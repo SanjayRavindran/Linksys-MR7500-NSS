@@ -1,0 +1,173 @@
+From 90cb4229e039075681a5eaf6e40555de97b50504 Mon Sep 17 00:00:00 2001
+From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
+Date: Sun, 8 Nov 2026 17:54:15 +0000
+Subject: [PATCH] qualcommax: ipq6018-mr7500: add complete NSS offload support
+ and hardware fixes
+
+- Enable Qualcomm NSS L2/L3/NAT/PPPoE/VLAN/Bridge offloading
+- Add Aquantia AQR114C C45 probe wait patch for cold-boot timing
+- Fix AQR114C reset GPIO 77 polarity and firmware loading
+- Configure QCN9074 6 GHz Wi-Fi 6E in fw-memory-mode 1
+- Override nss-macsec0 phy_addr to 8
+- Enable ath11k NSS Wi-Fi offload and hardware queues
+---
+ .../linux/qualcommax/dts/ipq6018-mr7500.dts   | 12 +++-
+ .../arch/arm64/boot/dts/qcom/ipq6018-nss.dtsi |  2 +-
+ target/linux/qualcommax/image/ipq60xx.mk      |  4 +-
+ ...de-wait-for-c45-phy-with-reset-gpios.patch | 59 +++++++++++++++++++
+ 4 files changed, 73 insertions(+), 4 deletions(-)
+ create mode 100644 target/linux/qualcommax/patches-6.12/0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch
+
+diff --git a/target/linux/qualcommax/dts/ipq6018-mr7500.dts b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+index 69923b7..00ff824 100644
+--- a/target/linux/qualcommax/dts/ipq6018-mr7500.dts
++++ b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+@@ -323,7 +323,9 @@
+ 
+ 	aqr114c: ethernet-phy@8 {
+ 		reg = <8>;
+-		reset-gpios = <&tlmm 77 GPIO_ACTIVE_HIGH>;
++		reset-gpios = <&tlmm 77 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <100000>;
++		reset-deassert-us = <250000>;
+ 		compatible = "ethernet-phy-ieee802.3-c45";
+ 		firmware-name = "marvell/AQR114C.cld";
+ 
+@@ -492,6 +494,7 @@
+ &dwc_0 {
+ 	#address-cells = <1>;
+ 	#size-cells = <0>;
++	dr_mode = "host";
+ 
+ 	usb3_port1: port@1 {
+ 		reg = <1>;
+@@ -518,6 +521,10 @@
+ 	status = "okay";
+ };
+ 
++&nss_macsec0 {
++	phy_addr = <0x8>;
++};
++
+ &pcie0 {
+ 	status = "okay";
+ 
+@@ -528,6 +535,8 @@
+ 			compatible = "pci17cb,1104";
+ 			reg = <0x00010000 0 0 0 0>;
+ 			qcom,ath11k-calibration-variant = "Linksys-MR7500";
++			qcom,calibration-variant = "Linksys-MR7500";
++			qcom,ath11k-fw-memory-mode = <1>;
+ 		};
+ 	};
+ };
+@@ -535,5 +544,6 @@
+ &wifi {
+ 	status = "okay";
+ 	qcom,ath11k-calibration-variant = "Linksys-MR7500";
++	qcom,calibration-variant = "Linksys-MR7500";
+ 	qcom,ath11k-fw-memory-mode = <1>;
+ };
+diff --git a/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6018-nss.dtsi b/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6018-nss.dtsi
+index 8369381..9e3e22c 100644
+--- a/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6018-nss.dtsi
++++ b/target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6018-nss.dtsi
+@@ -208,7 +208,7 @@
+ 		};
+ 	};
+ 
+-	nss-macsec0 {
++	nss_macsec0: nss-macsec0 {
+ 		compatible = "qcom,nss-macsec";
+ 		mdiobus = <&mdio>;
+ 		phy_addr = <0x18>;
+diff --git a/target/linux/qualcommax/image/ipq60xx.mk b/target/linux/qualcommax/image/ipq60xx.mk
+index dc4ca18..6738ad5 100644
+--- a/target/linux/qualcommax/image/ipq60xx.mk
++++ b/target/linux/qualcommax/image/ipq60xx.mk
+@@ -151,7 +151,7 @@ define Device/linksys_mr
+ 	KERNEL_SIZE := 8192k
+ 	IMAGES += factory.bin
+ 	IMAGE/factory.bin := append-kernel | pad-to $$$$(KERNEL_SIZE) | append-ubi | linksys-image type=$$$$(DEVICE_MODEL)
+-	DEVICE_PACKAGE := kmod-usb-ledtrig-usbport
++	DEVICE_PACKAGES := kmod-usb-ledtrig-usbport
+ endef
+ 
+ define Device/linksys_mr7350
+@@ -169,7 +169,7 @@ define Device/linksys_mr7500
+ 	DEVICE_MODEL := MR7500
+ 	SOC := ipq6018
+ 	NAND_SIZE := 512m
+-	IMAGE_SIZE := 147456k
++	IMAGE_SIZE := 83968k
+ 	DEVICE_PACKAGES += ipq-wifi-linksys_mr7500 \
+ 		ath11k-firmware-qcn9074 kmod-ath11k-pci \
+ 		kmod-leds-pwm kmod-phy-aquantia
+diff --git a/target/linux/qualcommax/patches-6.12/0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch b/target/linux/qualcommax/patches-6.12/0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch
+new file mode 100644
+index 0000000..a37405c
+--- /dev/null
++++ b/target/linux/qualcommax/patches-6.12/0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch
+@@ -0,0 +1,59 @@
++--- a/drivers/net/mdio/fwnode_mdio.c	2026-11-08 17:02:03.579674627 +0000
+++++ b/drivers/net/mdio/fwnode_mdio.c	2026-11-08 17:02:03.594180976 +0000
++@@ -7,7 +7,9 @@
++  */
++ 
++ #include <linux/acpi.h>
+++#include <linux/delay.h>
++ #include <linux/dev_printk.h>
+++#include <linux/jiffies.h>
++ #include <linux/fwnode_mdio.h>
++ #include <linux/of.h>
++ #include <linux/phy.h>
++@@ -119,6 +121,9 @@
++ }
++ EXPORT_SYMBOL(fwnode_mdiobus_phy_device_register);
++ 
+++#define FWNODE_MDIO_C45_PROBE_TIMEOUT_MS	15000
+++#define FWNODE_MDIO_C45_PROBE_RETRY_MS		250
+++
++ int fwnode_mdiobus_register_phy(struct mii_bus *bus,
++ 				struct fwnode_handle *child, u32 addr)
++ {
++@@ -134,10 +139,34 @@
++ 		return PTR_ERR(mii_ts);
++ 
++ 	is_c45 = fwnode_device_is_compatible(child, "ethernet-phy-ieee802.3-c45");
++-	if (is_c45 || fwnode_get_phy_id(child, &phy_id))
+++	if (is_c45 || fwnode_get_phy_id(child, &phy_id)) {
++ 		phy = get_phy_device(bus, addr, is_c45);
++-	else
+++
+++		/* A PHY's reset-gpios is only handled once the PHY device has
+++		 * been found, so a Clause 45 PHY that is still booting its
+++		 * internal ROM (e.g. Aquantia AQR114C on the Linksys MR7500)
+++		 * would be reported missing. Give such PHYs time to come up
+++		 * instead of failing the single ID read.
+++		 */
+++		if (is_c45 && IS_ERR(phy) && PTR_ERR(phy) == -ENODEV &&
+++		    fwnode_property_present(child, "reset-gpios")) {
+++			unsigned long start = jiffies;
+++			unsigned long timeout =
+++				start + msecs_to_jiffies(FWNODE_MDIO_C45_PROBE_TIMEOUT_MS);
+++
+++			while (IS_ERR(phy) && PTR_ERR(phy) == -ENODEV &&
+++			       time_before(jiffies, timeout)) {
+++				msleep(FWNODE_MDIO_C45_PROBE_RETRY_MS);
+++				phy = get_phy_device(bus, addr, is_c45);
+++			}
+++			if (!IS_ERR(phy))
+++				dev_info(&bus->dev,
+++					 "C45 PHY at address %u became ready after %u ms\n",
+++					 addr, jiffies_to_msecs(jiffies - start));
+++		}
+++	} else {
++ 		phy = phy_device_create(bus, addr, phy_id, 0, NULL);
+++	}
++ 	if (IS_ERR(phy)) {
++ 		rc = PTR_ERR(phy);
++ 		goto clean_mii_ts;
+-- 
+2.53.0
+

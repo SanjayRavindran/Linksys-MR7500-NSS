@@ -1,0 +1,49 @@
+#!/bin/sh
+# Enable Qualcomm NSS L2/L3/NAT/PPPoE/VLAN/Bridge + ECM + ath11k NSS Wi-Fi Offload by default on Linksys MR7500
+
+# 1. Set default LAN IP to 10.143.1.1/24 (matches Linksys MR7500 factory subnet & avoids 192.168.1.0/24 upstream WAN collision)
+uci -q del network.lan.ipaddr
+uci -q set network.lan.ipaddr='10.143.1.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q set network.globals.packet_steering='0'
+uci -q del network.globals.steering_flows
+uci -q commit network
+
+# 2. Disable conflicting software flow offloading in fw4 (NSS + ECM handles hardware acceleration)
+uci -q set firewall.@defaults[0].flow_offloading='0'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+uci -q commit firewall
+
+# 3. Configure ECM to use NSS hardware acceleration engine & enable bridge filtering
+if [ -f /etc/config/ecm ]; then
+    uci -q set ecm.global.acceleration_engine='nss'
+    uci -q set ecm.general.enable_bridge_filtering='1'
+    uci -q commit ecm
+fi
+
+# 4. Configure NSS RPS and 512MB pbuf + dynamic NSS clock auto-scaling (187.2 / 748.8 / 1497.6 MHz)
+if [ -f /etc/config/nss ]; then
+    uci -q set nss.general.enable_rps='1'
+    uci -q commit nss
+fi
+
+if [ -f /etc/config/pbuf ]; then
+    uci -q set pbuf.opt.memory_profile='512mb'
+    uci -q set pbuf.opt.auto_scale='1'
+    uci -q set pbuf.opt.scaling_governor='performance'
+    uci -q commit pbuf
+fi
+
+# 5. Ensure ath11k loads with NSS Wi-Fi offload enabled (nss_offload=1 frame_mode=2)
+if [ -f /etc/modules.d/ath11k ]; then
+    grep -q "nss_offload=1" /etc/modules.d/ath11k || sed -i 's/^ath11k$/ath11k nss_offload=1 frame_mode=2/' /etc/modules.d/ath11k
+fi
+
+# 6. Enable NSS init services on boot (qca-nss-ecm requires explicit enable due to double-space shebang)
+for svc in skb_recycler qca-nss-ecm qca-nss-drv qca-nss-pbuf; do
+    if [ -x "/etc/init.d/$svc" ]; then
+        /etc/init.d/"$svc" enable 2>/dev/null || true
+    fi
+done
+
+exit 0

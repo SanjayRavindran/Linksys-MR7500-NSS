@@ -1,0 +1,31 @@
+# OpenWrt build output & temporary files
+bin/
+build_dir/
+staging_dir/
+tmp/
+dl/
+feeds/
+.config
+.config.old
+*.orig
+*.rej
+*~
+
+# Firmware binaries and partition images
+*.bin
+*.cld
+*.itb
+*.img
+*.tar
+*.tar.gz
+*.ubi
+
+# Keep .gitkeep files in empty dirs
+!.gitkeep
+!files/lib/firmware/marvell/.gitkeep
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
