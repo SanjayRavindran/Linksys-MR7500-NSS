@@ -1,0 +1,4 @@
+#!/bin/sh
+[ "$INTERFACE" = "wan" ] && [ "$ACTION" = "ifup" -o "$ACTION" = "ifupdate" ] && {
+    /usr/sbin/phytool write wan/8:4/0xc441 0x0008 2>/dev/null || true
+}

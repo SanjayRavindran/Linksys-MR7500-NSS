@@ -53,4 +53,18 @@
     fi
 ) >/tmp/mr7500-wifi-init.log 2>&1 &
 
+# Aquantia AQR114C USXGMII in-band auto-negotiation keeper
+(
+    while true; do
+        if [ "$(cat /sys/class/net/wan/carrier 2>/dev/null)" = "1" ]; then
+            val=$(/usr/sbin/phytool read wan/8:4/0xc441 2>/dev/null)
+            if [ "$val" != "0x0008" ]; then
+                logger -t aqr-usxgmii "Enabling USXGMII in-band auto-neg (4:0xc441=0x0008)"
+                /usr/sbin/phytool write wan/8:4/0xc441 0x0008
+            fi
+        fi
+        sleep 2
+    done
+) >/dev/null 2>&1 &
+
 exit 0

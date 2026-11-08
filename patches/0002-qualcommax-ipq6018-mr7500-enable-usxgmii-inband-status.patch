@@ -1,0 +1,30 @@
+From c12a451cf32a24ac125ad0a7aaecab4d8e46ef8d Mon Sep 17 00:00:00 2001
+From: Julius Bairaktaris <julius@bairaktaris.de>
+Date: Sun, 26 Jul 2026 11:45:30 +0200
+Subject: [PATCH] qualcommax: enable in-band signalling on USXGMII ports
+
+USXGMII carries the line rate to the MAC in a Clause 37 code word, so the
+link needs in-band signalling. Without "managed = in-band-status", phylink
+and phylib disable in-band on the PHY, preventing traffic from crossing
+the system interface.
+
+Signed-off-by: Julius Bairaktaris <julius@bairaktaris.de>
+---
+ target/linux/qualcommax/dts/ipq6018-mr7500.dts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/target/linux/qualcommax/dts/ipq6018-mr7500.dts b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+index 4faf852..bb58959 100644
+--- a/target/linux/qualcommax/dts/ipq6018-mr7500.dts
++++ b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+@@ -422,6 +422,7 @@
+ 	status = "okay";
+ 	label = "wan";
+ 	phy-handle = <&aqr114c>;
+ 	phy-mode = "usxgmii";
++	managed = "in-band-status";
+ 	nvmem-cells = <&hw_mac_addr 0>;
+ 	nvmem-cell-names = "mac-address";
+ };
+-- 
+2.53.0
