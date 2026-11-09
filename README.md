@@ -306,6 +306,7 @@ ssh root@10.143.1.1 "sh -s" < scripts/validate_firmware.sh
 ## Documentation & Runbooks
 
 Comprehensive technical documentation is organized in [`docs/`](docs/):
+* [`MONTHLY_UPDATE_GUIDE.md`](MONTHLY_UPDATE_GUIDE.md) — Step-by-step monthly manual update runbook for downloading, verifying, flashing, and testing.
 * [`docs/BUILD_PIPELINE.md`](docs/BUILD_PIPELINE.md) — Automated monthly CI/CD pipeline, private publishing architecture, and sysupgrade runbook.
 * [`docs/KNOWN_ISSUES_AND_FIXES.md`](docs/KNOWN_ISSUES_AND_FIXES.md) — Exhaustive catalog of all 10 major issues, root cause analyses, and permanent fixes.
 * [`docs/STATIC_BINARY_ANALYSIS_GUIDE.md`](docs/STATIC_BINARY_ANALYSIS_GUIDE.md) — Technical reference on binary blob formats, architectures (ARC, Ubi32, Hexagon, Cortex-M), and static analysis tools.
