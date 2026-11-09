@@ -236,9 +236,43 @@ The CSR8811 Bluetooth chip is wired to UART 2 (`blsp1_uart2` / `/dev/ttyMSM1`) a
 
 ---
 
+## Automated Regression & Rebase Validation Suite
+
+To verify all 13 subsystems after recompiling or rebasing OpenWrt:
+
+### 1. From Python (Host PC / CI):
+```bash
+python tests/test_mr7500_validation.py --host 10.143.1.1
+```
+
+### 2. On-Device Shell (Direct on Router or over SSH):
+```bash
+# Direct on router or piped via SSH:
+ssh root@10.143.1.1 "sh -s" < scripts/validate_firmware.sh
+```
+
+**Verified Test Coverage:**
+* `TC-01`: Active Boot Slot 1 (`boot_part=1`) & Slot 2 OEM fallback intact.
+* `TC-02`: Linux 6.12 Quad-Core 1.8 GHz Performance Governor.
+* `TC-03`: Qualcomm NSS Ubi Core 0 driver & ECM acceleration engine.
+* `TC-04`: Marvell/Aquantia AQR114C 5GbE WAN & USXGMII Clause 37 auto-negotiation.
+* `TC-05`: QCA8075 4-port Gigabit LAN switch fabric.
+* `TC-06`: WAN DHCP acquisition & outbound IPv4 internet routing.
+* `TC-07`: LAN DHCPv4 server (`10.143.1.1/24`), Option 3/6, & DNS resolver.
+* `TC-08`: RFC 4862 IPv6 SLAAC, odhcpd, and Cloudflare IPv6 ping.
+* `TC-09`: Tri-Band Wi-Fi 6E (2.4G/5G/6G) & direct `mac80211` host path (0 RX starvation).
+* `TC-10`: USB 3.0 DWC3 xHCI SuperSpeed host & storage drivers.
+* `TC-11`: 7x TSENS thermal monitoring zones & KPSS hardware watchdog.
+* `TC-12`: CSR8811 Bluetooth power-saving hardware reset standby.
+* `TC-13`: Qualcomm NSS ECM silicon fast-path forwarding counters.
+
+---
+
 ## Documentation & Runbooks
 
 Comprehensive technical documentation is organized in [`docs/`](docs/):
+* [`docs/KNOWN_ISSUES_AND_FIXES.md`](docs/KNOWN_ISSUES_AND_FIXES.md) — Exhaustive catalog of all 10 major issues, root cause analyses, and permanent fixes.
+* [`docs/STATIC_BINARY_ANALYSIS_GUIDE.md`](docs/STATIC_BINARY_ANALYSIS_GUIDE.md) — Technical reference on binary blob formats, architectures (ARC, Ubi32, Hexagon, Cortex-M), and static analysis tools.
 * [`docs/hardware-audit-and-peripheral-probe.md`](docs/hardware-audit-and-peripheral-probe.md) — Comprehensive hardware audit and live probe report.
 * [`docs/HARDWARE_TEST_RESULTS.md`](docs/HARDWARE_TEST_RESULTS.md) — Multi-Gigabit 2.37 Gbps WAN, USB 3.0, and wireless test logs.
 * [`docs/SKILL.md`](docs/SKILL.md) — Technical runbook and project knowledge base.
