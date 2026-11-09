@@ -46,10 +46,9 @@
   * Firewall: `flow_offloading='0'`, `flow_offloading_hw='0'`.
   * ECM: `acceleration_engine='nss'`, `enable_bridge_filtering='1'`.
   * NSS: `enable_rps='1'`, `memory_profile='512mb'`, `auto_scale='1'`.
-  * `ath11k`: `nss_offload=0 frame_mode=0` in `/etc/modules.d/ath11k`.
+  * `ath11k`: `nss_offload=0 frame_mode=0` in `/etc/modules.d/ath11k` (direct mac80211 host path prevents RX buffer starvation).
 * `files/etc/rc.local`:
   * Asynchronous one-shot initializer for `phy0..phy2` auto-enabling 2.4G (`HE40`), 5G (`HE80`), and 6G (`HE160`, `OWE`, `ieee80211w=2`).
-  * Aquantia AQR114C USXGMII in-band auto-negotiation keeper daemon (`4:0xc441 = 0x0008`).
 
 ---
 

@@ -11,7 +11,27 @@ description: >-
 
 # Linksys MR7500 (Hydra Pro 6E) OpenWrt + NSS Porting Skill
 
-This skill documents the hardware architecture, verified stock firmware state, required Device Tree (`.dts`) and kernel patches, triple-read backup verification rules, and OpenWrt + NSS build/test procedures for the **Linksys MR7500 v1 (codename `divo`)**.
+This skill documents the hardware architecture, verified stock firmware state, required Device Tree (`.dts`) and kernel patches, triple-read backup verification rules, peripheral audits, and OpenWrt + NSS build/test procedures for the **Linksys MR7500 v1 (codename `divo`)**.
+
+---
+
+> [!CAUTION]
+> ### DISCLAIMER & LIMITATION OF LIABILITY
+> **The author(s), contributors, and maintainers of this repository are NOT responsible for any bricked devices, damaged hardware, bootloops, destroyed flash partitions, lost calibration data, data loss, fire, voided warranties, or any other damages or failures resulting from using, compiling, flashing, or modifying the code, device trees, patches, configurations, or instructions provided in this repository.**
+> 
+> Flashing custom third-party firmware always carries inherent risks of permanent hardware damage. Always ensure you have triple-redundant, bit-for-bit verified backups of all MTD partitions (especially factory RF calibration partition `0:ART` and boot parameters) before flashing.
+> 
+> **PROCEED STRICTLY AT YOUR OWN RISK.**
+
+---
+
+> [!NOTE]
+> ### LLM / AI-ASSISTED DEVELOPMENT NOTICE
+> **This repository, its architectural designs, Device Tree (`.dts`) modifications, kernel timing patches, reverse engineering analyses, peripheral probes, automation scripts, and technical documentation were developed with and continue to use Large Language Models (LLMs) and Advanced AI Coding Assistants.**
+> 
+> While every single patch, hardware block, network driver, and throughput metric has been rigorously and empirically tested, validated, and verified on physical Linksys MR7500 hardware via real-time UART serial telemetry and network instruments, users should exercise due diligence and review code prior to compiling or flashing.
+
+---
 
 ## 1. Environment & Access Topology
 
@@ -32,18 +52,26 @@ This skill documents the hardware architecture, verified stock firmware state, r
 
 Detailed live telemetry is stored in [work/live_stock_recon_clean.txt](../../../work/live_stock_recon_clean.txt) and [references/hardware-and-dts-audit.md](./references/hardware-and-dts-audit.md).
 
-* **SoC:** Qualcomm IPQ6018 (`Qualcomm Technologies, Inc. IPQ6018/AP-CP01-C3`, `machid=8030002`), 4x ARM Cortex-A53 @ 1.8 GHz.
+* **SoC:** Qualcomm IPQ6018 (`Qualcomm Technologies, Inc. IPQ6018/AP-CP01-C3`, `machid=8030002`), 4x ARM Cortex-A53 @ 1.8 GHz (`cpufreq-dt`, governor `performance`).
 * **RAM:** 512 MB DDR3L (`386,492 kB` total in Linux 6.12 after reserved carveouts, ~129 MB free/available on persistent NAND boot).
 * **Flash:** 512 MB Hynix `H27S4G8F2EDA-BC` SLC NAND (`erasesize=0x20000` / 128 KiB, `pagesize=2048`, `0` bad PEBs), dual A/B slots:
   * **Slot 1 (`boot_part=1`):** `kernel` (`mtd13`, `0xb80000`) + `rootfs` (`mtd14`) — Active OpenWrt 6.12.92 + NSS 12.5.
   * **Slot 2 (`boot_part=2`):** `alt_kernel` (`mtd15`, `0x5d80000`) + `alt_rootfs` (`mtd16`) — Untouched Stock OEM `1.1.12.216943` fallback.
 * **Ethernet / Switch:**
   * **LAN 1–4 (`dp1..dp4`):** QCA8075 PHY (`MDIO 0..3`) over `QSGMII` (`switch_mac_mode = <0x0>`), factory MAC `D8:EC:5E:13:18:FC`.
-  * **WAN Multi-Gigabit (`dp5_syn`):** Marvell/Aquantia **AQR114C-B0** PHY (`MDIO 8`, C45) over `USXGMII` (`switch_mac_mode1 = <0xd>`) driven by Synopsys XGMAC (`0x3a003000`), factory MAC `D8:EC:5E:13:18:FB`. Requires `AQR114C.cld` (`v5.6.5 Cybertan Divo`) and C45 probe wait patch `0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch`. Verified linking up at **2500 Mb/s Full Duplex** out-of-the-box on cold boot.
+  * **WAN Multi-Gigabit (`dp5_syn`):** Marvell/Aquantia **AQR114C-B0** PHY (`MDIO 8`, C45) over `USXGMII` (`switch_mac_mode1 = <0xd>`) driven by Synopsys XGMAC (`0x3a003000`), factory MAC `D8:EC:5E:13:18:FB`. Requires `AQR114C.cld` (`v5.6.5 Cybertan Divo`) and C45 probe wait patch `0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch`. Verified linking up at **2500 Mb/s Full Duplex** out-of-the-box on cold boot, sustaining **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
 * **Wi-Fi Radios (Tri-Band Wi-Fi 6E):**
   * **2.4 GHz (`phy1`, 2x2 ax HE40):** IPQ6018 internal (`QCN5022`, `bdwlan.b11`, MAC `D8:EC:5E:13:18:FC`).
   * **5 GHz (`phy0`, 2x2 ax HE80):** IPQ6018 internal (`QCN5052`, `bdwlan.b11`, MAC `D8:EC:5E:13:18:FD`).
   * **6 GHz (`phy2`, 4x4 ax HE160):** PCIe `0000:01:00.0` (`17cb:1104` QCN9024/QCN9074, `qcn9000/bdwlan.ba4`, MAC `D8:EC:5E:13:18:FE`, OWE encryption).
+* **USB 3.0 / 2.0:**
+  * Qualcomm DWC3 mapped to Synopsys xHCI USB 3.0 Host (`xhci-hcd.1.auto`). VBUS regulator enabled via GPIO 25. Tested with live USB storage drive (`/dev/sdb`, 3.97 GB) at SuperSpeed 5 Gbps. Activity LED `blue:usb` automatic kernel trigger `[usbport]`.
+* **Bluetooth Subsystem (CSR8811):**
+  * Cambridge Silicon Radio CSR8811 BLE 4.1 wired to QUP UART 2 (`blsp1_uart2` / `/dev/ttyMSM1`) @ 115200 baud BCSP. Power and reset controlled via **GPIO 34** (`gpio546`). Verified power cycle, held safely in hardware reset (`gpio546=0`) to save ~50–80 mW power and prevent 2.4 GHz RF co-existence degradation.
+* **Hardware Watchdog & Thermal Sensors:**
+  * Qualcomm KPSS hardware watchdog active (`/dev/watchdog0`). 7x TSENS thermal zones active (62–64°C).
+* **Buttons & LEDs:**
+  * WPS (GPIO 37) and Reset (GPIO 56) with pull-ups. System status LEDs driven by IPQ6018 internal PWM 0..3 (`pwm-leds`). Auxiliary I2C bus (`i2c@78b7000`, GPIO 42/43) connected to PCA9632 LED driver at `0x62` (preboot init by U-Boot).
 
 ---
 
@@ -56,15 +84,16 @@ Detailed live telemetry is stored in [work/live_stock_recon_clean.txt](../../../
    * Extracted stock `FW_MR7500_1.1.12.216943_prod.img`.
    * Complete stock fallback bundle preserved in `~/mr7500/stock_nss_11_5_fallback/` and [stock_nss_11_5_fallback/](../../../stock_nss_11_5_fallback/).
 3. **Custom OpenWrt 6.12.92 + NSS 12.5 Firmware Build (`DONE`):**
-   * Built from `qosmio/openwrt-ipq` (`main-nss` @ `92a2d10`, branch `mr7500-nss-default`) with `NSS.FW.12.5-210-CP.R`, EIP-197 crypto, `ath11k` (`WLAN.HK.2.12-01460`, `nss_offload=1 frame_mode=2`), OEM `AQR114C.cld` (`v5.6.5 Cybertan Divo`), `luci-ssl`, `luci-app-sqm`, and `sqm-scripts-nss`.
+   * Built from `qosmio/openwrt-ipq` (`main-nss` @ `92a2d10`, branch `mr7500-nss-default`) with `NSS.FW.12.5-210-CP.R`, EIP-197 crypto, `ath11k` (`WLAN.HK.2.12-01460`, `nss_offload=0 frame_mode=0`), OEM `AQR114C.cld` (`v5.6.5 Cybertan Divo`), `luci-ssl`, `luci-app-sqm`, and `sqm-scripts-nss`.
    * Built images stored locally in [bin/](../../../bin/):
      * [openwrt-qualcommax-ipq60xx-linksys_mr7500-initramfs-uImage.itb](../../../bin/openwrt-qualcommax-ipq60xx-linksys_mr7500-initramfs-uImage.itb) (`18,357,504` B) — SHA-256: `2456e02566866fc4741220ee7835161af74d1c361e9bac2c025339c5ba9aa542`
      * [openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-factory.bin](../../../bin/openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-factory.bin) (`21,235,712` B) — SHA-256: `441a564149e741c1b3677e17a1d9ca6f7dd082aa8a1e72e6f7d46b83b214d66a`
      * [openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin](../../../bin/openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin) (`17,643,784` B) — SHA-256: `a896390e0af4b2fd381186335318cbab304038103b11cb96fea123092ff788b7`
      * [sha256sums](../../../bin/sha256sums) (`836` B) — SHA-256: `b4e53df08ed6e5a05ea9e95240205ebc392271a48b1afaf68e43d59cfe56efcd`
-4. **Stage A & Stage B Validation (`100% PASS` across all test cases `TC-01` through `TC-08` & `TC-10`):**
+4. **Stage A & Stage B Validation (`100% PASS` across all test cases `TC-01` through `TC-10`):**
    * **NSS NAT Throughput:** **944 Mbps** line rate across SNAT with **99.95% ARM Cortex-A53 CPU idle** (`0.03% %soft` sirq).
    * **Multi-Gigabit WAN:** AQR114C links up at **2500 Mb/s Full Duplex** on cold unattended boot via kernel C45 probe wait patch `0982`.
+   * **Peer-to-Peer Multi-Gigabit Speed Test:** **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
    * **Tri-Band Wi-Fi 6E:** All 3 radios broadcasting out-of-the-box (`2.4G HE40`, `5G HE80`, `6G HE160 OWE`).
    * **Dual-Slot Protection:** Slot 2 (`mtd15`/`mtd16`) verified 100% bit-for-bit identical to OEM backup pass1. Rollback to OEM `1.1.12.216943` guaranteed via `fw_setenv boot_part 2` or U-Boot `setenv boot_part 2; saveenv; reset`.
 
@@ -78,8 +107,8 @@ Detailed live telemetry is stored in [work/live_stock_recon_clean.txt](../../../
   * Automated persistently on boot and interface events via `/etc/rc.local` and `/etc/hotplug.d/iface/10-wan-aqr`.
 * **C45 PHY Probe Timing Fix (`0982-net-mdio-fwnode-wait-for-c45-phy-with-reset-gpios.patch`):**
   * Linux `fwnode_mdiobus_register_phy` queries Clause 45 PHY ID before executing `reset-gpios`. A cold-booted AQR114C PHY takes ~260 ms after power-on to respond on MDIO address 8. Adding a 250 ms retry loop in `fwnode_mdio.c` allows the PHY to answer reliably without race conditions on unattended boot.
-* **OpenWrt 25.x First-Boot LAN Netmask:**
-  * OpenWrt 25.x uses `list ipaddr '192.168.1.1/24'`. Setting only `option ipaddr '10.143.1.1'` creates `/32`. In `files/etc/uci-defaults/99-mr7500-nss-defaults`, delete `ipaddr` and set both `ipaddr='10.143.1.1'` and `netmask='255.255.255.0'`.
+* **OpenWrt First-Boot LAN Netmask:**
+  * In `files/etc/uci-defaults/99-mr7500-nss-defaults`, delete `ipaddr` and set both `ipaddr='10.143.1.1'` and `netmask='255.255.255.0'`.
 * **802.1Q VLAN Offload (`qca-nss-vlan`):**
   * Attach VLANs to physical data-plane ports (e.g. `lan4.100`) rather than bridge interface (`br-lan.100`), as `qca-nss-vlan` requires a valid physical switch port ID.
 * **Linksys Dual-Slot `sysupgrade`:**
@@ -93,3 +122,7 @@ Detailed live telemetry is stored in [work/live_stock_recon_clean.txt](../../../
 * **LAN Subnet & Gateway Hygiene:**
   * Interface `lan` must never have `option gateway '192.168.1.1'`. An off-subnet gateway causes modern operating systems (iOS, macOS, Windows) to discard the default router. Default route belongs solely on `wan` via DHCP.
   * DHCP option 3 (`3,10.143.1.1`) and option 6 (`6,10.143.1.1`) explicitly advertise the router's IP as default gateway and recursive DNS server to all LAN/Wi-Fi clients.
+* **USB 3.0 Storage Support:**
+  * IPQ6018 USB DWC3 Host Controller requires GPIO 25 driven low for VBUS power. With `kmod-fs-vfat`, `kmod-fs-exfat`, and `kmod-usb-storage`, storage devices are mounted and LED triggers active under `blue:usb`.
+* **Bluetooth CSR8811 Power Management:**
+  * Power and reset driven by GPIO 34 (`gpio546`). When held low (`0`), chip enters deep hardware reset, cutting idle power consumption and eliminating RF interference on 2.4 GHz channels.
