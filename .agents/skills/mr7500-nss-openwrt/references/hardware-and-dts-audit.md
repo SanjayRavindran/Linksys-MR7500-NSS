@@ -46,6 +46,28 @@
   * Firewall: `flow_offloading='0'`, `flow_offloading_hw='0'`.
   * ECM: `acceleration_engine='nss'`, `enable_bridge_filtering='1'`.
   * NSS: `enable_rps='1'`, `memory_profile='512mb'`, `auto_scale='1'`.
-  * `ath11k`: `nss_offload=1 frame_mode=2` in `/etc/modules.d/ath11k`.
+  * `ath11k`: `nss_offload=0 frame_mode=0` in `/etc/modules.d/ath11k`.
 * `files/etc/rc.local`:
   * Asynchronous one-shot initializer for `phy0..phy2` auto-enabling 2.4G (`HE40`), 5G (`HE80`), and 6G (`HE160`, `OWE`, `ieee80211w=2`).
+  * Aquantia AQR114C USXGMII in-band auto-negotiation keeper daemon (`4:0xc441 = 0x0008`).
+
+---
+
+## 3. Peripheral Hardware & Bluetooth Subsystem
+
+* **Bluetooth Subsystem (CSR8811 / CSR8x11):**
+  * **Chipset:** CSR / Qualcomm CSR8811 A08 (BLE 4.1).
+  * **UART Port:** `blsp1_uart2` (`/dev/ttyMSM1`, `0x078b0000`) @ 115200 baud, BCSP protocol.
+  * **Power / Reset GPIO:** `tlmm 34` (Linux 6.12 `gpio546`).
+  * **Power Control:**
+    * Power ON / Enable: `echo 546 > /sys/class/gpio/export && echo out > /sys/class/gpio/gpio546/direction && echo 1 > /sys/class/gpio/gpio546/value`
+    * Power OFF / Reset: `echo 0 > /sys/class/gpio/gpio546/value && echo 546 > /sys/class/gpio/unexport`
+  * **Design Choice:** Linksys OEM firmware only used this BLE chip for initial smartphone onboarding via the Linksys app. Holding it in reset (`GPIO 34 = 0`) saves ~50–80 mW of power and eliminates 2.4 GHz RF co-existence degradation.
+* **USB 3.0 / 2.0 Subsystem:**
+  * **Controller:** Qualcomm DWC3 xHCI SuperSpeed host controller (`xhci-hcd.1.auto`).
+  * **VBUS Regulator:** `reg_usb_vbus` driven by GPIO 25 (`tlmm 25 GPIO_ACTIVE_LOW`).
+  * **USB LED:** `blue:usb` with `usbport` kernel trigger.
+  * **Supported Filesystems:** Built-in `ext4`, plus `kmod-fs-vfat`, `kmod-fs-exfat`, `kmod-nls-*`, and `usbutils`.
+* **Auxiliary I2C Bus (`i2c@78b7000` / `blsp1_i2c3`):**
+  * SCL = GPIO 42, SDA = GPIO 43.
+  * Attached device: NXP PCA9632 4-bit Fm+ I2C LED driver at address `0x62`. Handled by U-Boot in preboot; disabled in Linux kernel as primary LEDs are driven via internal PWM.
