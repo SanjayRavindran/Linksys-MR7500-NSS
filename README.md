@@ -130,7 +130,7 @@ The 5GbE WAN port requires the Marvell/Aquantia PHY firmware (`AQR114C.cld`, v5.
 ```
 * **Source:** Official Linksys Firmware `FW_MR7500_1.1.12.216943_prod.img`
 * **Target:** `files/lib/firmware/marvell/AQR114C.cld` (`393,218` bytes)
-* **SHA-256 Checksum:** `8a0e88cf738a0b07e602495d43be6c13fe6272551527efd04b6df00d3cb12eb6`
+* **SHA-256 Checksum:** `32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`
 
 ### 3. Build the Firmware
 
@@ -150,6 +150,25 @@ Once finished, the compiled images will be located in `bin/targets/qualcommax/ip
 * `openwrt-qualcommax-ipq60xx-linksys_mr7500-initramfs-uImage.itb` (RAM-boot test image)
 * `openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-factory.bin` (Factory flash image)
 * `openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin` (Sysupgrade image for Slot 1)
+
+---
+
+## Automated Monthly CI/CD Pipeline (Private Builds)
+
+An automated GitHub Actions workflow ([`.github/workflows/build-monthly-snapshot.yml`](.github/workflows/build-monthly-snapshot.yml)) compiles and publishes the latest OpenWrt snapshot with our Qualcomm NSS modifications on the **1st of every month** (`cron: '0 0 1 * *'`), or on-demand via **workflow_dispatch**.
+
+### Strict Privacy & Proprietary Blob Licensing
+Because compiled firmware images bundle proprietary vendor microcode (**Marvell AQR114C PHY firmware** and **Qualcomm NSS 12.5 binaries**) which are **not licensed for public redistribution**, all compiled binary images are kept strictly private:
+* **Private Actions Artifacts:** Retained for 90 days and downloadable only by the authenticated repository owner.
+* **Private Draft Releases:** Published as Draft Releases (`gh release create --draft`), which are completely invisible to the public and accessible exclusively to repository maintainers.
+* **Optional AES-256 Symmetric GPG Encryption:** By setting the `BUILD_ENCRYPTION_KEY` repository secret, the firmware tarball is encrypted with AES-256 (`.tar.gz.gpg`).
+
+### Two-Tier Testing Architecture
+Every build must pass two independent test gates:
+1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 8 gates validating script syntax, DTS nodes, kernel timing patches (`0982`), credential hygiene, router mode defaults, diffconfig symbols, and blob extractor integrity.
+2. **Post-Build Validation ([`scripts/validate_build_artifacts.sh`](scripts/validate_build_artifacts.sh)):** 12 gates verifying binary sizes, SquashFS tar partitions (`kernel`, `root`), board tags (`BOARD=linksys_mr7500`), FIT magic headers (`0xd00dfeed`), and cryptographic SHA-256 sums.
+
+See [`docs/BUILD_PIPELINE.md`](docs/BUILD_PIPELINE.md) for full details on secrets configuration, manual execution, and monthly sysupgrade instructions.
 
 ---
 
@@ -215,6 +234,22 @@ To return to factory stock firmware at any time:
   * **5 GHz:** `Linksys-MR7500-5G` (Channel 36, HE80, WPA2-PSK: `LinksysMR7500!`)
   * **6 GHz:** `Linksys-MR7500-6G` (Channel 37, HE160, OWE Encryption)
 
+### Operating Mode Switcher (`/usr/sbin/switch_mode`)
+Every build defaults to standard **Router Mode** (`10.143.1.1/24`, NAT on WAN, LAN DHCP server active). All builds bundle the pre-installed mode switcher utility at `/usr/sbin/switch_mode`:
+
+* **Convert to Switch + AP Mode (Dumb AP):**
+  Bridges all 5 physical ports (5GbE WAN + 4x Gigabit LAN) and all 3 Wi-Fi 6E radios into a unified bridge with local DHCP server disabled:
+  ```bash
+  /usr/sbin/switch_mode ap 192.168.1.91
+  ```
+  *(LuCI and SSH become accessible at `https://192.168.1.91/` with automatic fallback at `10.143.1.1`)*
+
+* **Revert to Router Mode:**
+  Restores standard WAN DHCP client on port 5GbE WAN, NAT masquerading, and authoritative LAN DHCP server:
+  ```bash
+  /usr/sbin/switch_mode router
+  ```
+
 ---
 
 ## Bluetooth Subsystem Power Management
@@ -271,6 +306,7 @@ ssh root@10.143.1.1 "sh -s" < scripts/validate_firmware.sh
 ## Documentation & Runbooks
 
 Comprehensive technical documentation is organized in [`docs/`](docs/):
+* [`docs/BUILD_PIPELINE.md`](docs/BUILD_PIPELINE.md) — Automated monthly CI/CD pipeline, private publishing architecture, and sysupgrade runbook.
 * [`docs/KNOWN_ISSUES_AND_FIXES.md`](docs/KNOWN_ISSUES_AND_FIXES.md) — Exhaustive catalog of all 10 major issues, root cause analyses, and permanent fixes.
 * [`docs/STATIC_BINARY_ANALYSIS_GUIDE.md`](docs/STATIC_BINARY_ANALYSIS_GUIDE.md) — Technical reference on binary blob formats, architectures (ARC, Ubi32, Hexagon, Cortex-M), and static analysis tools.
 * [`docs/hardware-audit-and-peripheral-probe.md`](docs/hardware-audit-and-peripheral-probe.md) — Comprehensive hardware audit and live probe report.

@@ -76,12 +76,19 @@ NPROC=$(nproc 2>/dev/null || echo 4)
 echo "[*] Compiling firmware using $NPROC CPU threads..."
 make -j"$NPROC"
 
-# 8. Summary of built images
+# 8. Summary & Post-Build Validation
 OUT_TARGET="$BUILD_DIR/bin/targets/qualcommax/ipq60xx"
 echo "======================================================================"
 echo " Build Complete! Built images in $OUT_TARGET:"
 echo "======================================================================"
 ls -lh "$OUT_TARGET"/*mr7500* "$OUT_TARGET"/sha256sums 2>/dev/null || true
+
+# Run binary artifact verification
+if [ -x "$SCRIPT_DIR/validate_build_artifacts.sh" ]; then
+    echo "[*] Running post-build artifact integrity checks..."
+    "$SCRIPT_DIR/validate_build_artifacts.sh" "$OUT_TARGET"
+fi
+
 echo ""
 echo "Factory install:   openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-factory.bin"
 echo "Sysupgrade:        openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin"

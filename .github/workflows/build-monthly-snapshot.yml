@@ -1,0 +1,180 @@
+name: Build Monthly Snapshot Firmware (Private)
+
+on:
+  schedule:
+    # Run monthly on the 1st of every month at 00:00 UTC
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      encrypt_artifacts:
+        description: 'Encrypt firmware with AES-256 (requires BUILD_ENCRYPTION_KEY secret)'
+        required: false
+        type: boolean
+        default: false
+      create_draft_release:
+        description: 'Publish as private Draft Release (only visible to repo owner)'
+        required: false
+        type: boolean
+        default: true
+      retention_days:
+        description: 'Actions Artifact retention period in days (max 90)'
+        required: false
+        type: number
+        default: 90
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  pre-build-tests:
+    name: Pre-Build Validation & Test Suite
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run CI Automated Test Suite
+        run: |
+          chmod +x ./scripts/ci_test.sh ./scripts/validate_build_artifacts.sh
+          ./scripts/ci_test.sh
+
+  build-firmware:
+    name: Build & Package Private Firmware
+    needs: pre-build-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Maximize Runner Disk Space
+        run: |
+          echo "=== Free disk space before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a --force 2>/dev/null || true
+          echo "=== Free disk space after cleanup ==="
+          df -h /
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-distutils python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget squashfs-tools u-boot-tools gpg
+
+      - name: Cache OpenWrt dl Directory
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/openwrt-mr7500-build/dl
+          key: openwrt-dl-${{ hashFiles('config/mr7500_nss_diffconfig') }}
+          restore-keys: |
+            openwrt-dl-
+
+      - name: Extract AQR114C Blob Just-In-Time
+        run: |
+          chmod +x ./scripts/extract_stock_blobs.sh
+          ./scripts/extract_stock_blobs.sh /home/runner/mr7500_stock_dl
+
+      - name: Build OpenWrt + NSS Firmware
+        run: |
+          chmod +x ./scripts/build.sh ./scripts/validate_build_artifacts.sh
+          BUILD_DIR="/home/runner/openwrt-mr7500-build" ./scripts/build.sh
+
+      - name: Post-Build Binary Artifacts Validation
+        run: |
+          OUT_TARGET="/home/runner/openwrt-mr7500-build/bin/targets/qualcommax/ipq60xx"
+          ./scripts/validate_build_artifacts.sh "$OUT_TARGET"
+
+      - name: Package Binaries & Manifest
+        id: package
+        run: |
+          BUILD_DATE=$(date +'%Y%m%d')
+          OUT_TARGET="/home/runner/openwrt-mr7500-build/bin/targets/qualcommax/ipq60xx"
+          PKG_DIR="/home/runner/mr7500-release"
+          mkdir -p "$PKG_DIR"
+
+          # Copy binaries
+          cp "$OUT_TARGET"/openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin "$PKG_DIR/"
+          cp "$OUT_TARGET"/openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-factory.bin "$PKG_DIR/"
+          cp "$OUT_TARGET"/openwrt-qualcommax-ipq60xx-linksys_mr7500-initramfs-uImage.itb "$PKG_DIR/"
+
+          # Generate fresh checksums
+          cd "$PKG_DIR"
+          sha256sum *mr7500* > sha256sums.txt
+          md5sum *mr7500* > md5sums.txt
+
+          # Generate build manifest
+          cat << 'EOF_MANIFEST' > BUILD_MANIFEST.txt
+          Linksys MR7500 (Hydra Pro 6E) Qualcomm NSS Firmware
+          ==================================================
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%SZ")
+          Base Tree: qosmio/openwrt-ipq (main-nss @ 92a2d10)
+          Commit Revision: ${{ github.sha }}
+          Kernel: 6.12.92
+          NSS Firmware: 12.5-210
+          Default Mode: Router Mode (10.143.1.1/24, WAN DHCP client, LAN DHCP server active)
+          Mode Switcher: /usr/sbin/switch_mode [router|ap] pre-installed
+          USXGMII 5GbE WAN: In-Band Signalling (managed = "in-band-status")
+          PHY Firmware: Marvell AQR114C (v5.6.5 Cybertan Divo, SHA-256 32bc96c2...)
+          Hardware Offload: Qualcomm NSS L2/L3/NAT/PPPoE/VLAN/Bridge + EIP-197 Crypto
+          Wi-Fi: Tri-Band 2.4G/5G/6G with ath11k (QCN9074 fw-memory-mode 1)
+          Bluetooth CSR8811: Disabled in standby (GPIO 34 held low)
+          USB 3.0: Enabled in DWC3 host mode (VBUS GPIO 37 active-high)
+          EOF_MANIFEST
+
+          # Create distribution archive
+          ARCHIVE_NAME="mr7500-openwrt-nss-${BUILD_DATE}.tar.gz"
+          tar -czvf "/home/runner/$ARCHIVE_NAME" *
+
+          # Encryption handling
+          ENCRYPT_KEY="${{ secrets.BUILD_ENCRYPTION_KEY }}"
+          if [ -n "$ENCRYPT_KEY" ] || [ "${{ github.event.inputs.encrypt_artifacts }}" = "true" ]; then
+            if [ -z "$ENCRYPT_KEY" ]; then
+              echo "::error::BUILD_ENCRYPTION_KEY secret is required when encryption is enabled."
+              exit 1
+            fi
+            echo "[*] Encrypting firmware archive with AES-256 GPG..."
+            gpg --batch --yes --passphrase "$ENCRYPT_KEY" --symmetric --cipher-algo AES256 \
+              -o "/home/runner/${ARCHIVE_NAME}.gpg" "/home/runner/$ARCHIVE_NAME"
+            rm -f "/home/runner/$ARCHIVE_NAME"
+            echo "FINAL_ARTIFACT=/home/runner/${ARCHIVE_NAME}.gpg" >> $GITHUB_OUTPUT
+            echo "IS_ENCRYPTED=true" >> $GITHUB_OUTPUT
+          else
+            echo "FINAL_ARTIFACT=/home/runner/$ARCHIVE_NAME" >> $GITHUB_OUTPUT
+            echo "IS_ENCRYPTED=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload Private Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mr7500-firmware-${{ steps.package.outputs.BUILD_DATE }}
+          path: ${{ steps.package.outputs.FINAL_ARTIFACT }}
+          retention-days: ${{ github.event.inputs.retention_days || 90 }}
+          if-no-files-found: error
+
+      - name: Publish Private Draft Release
+        if: github.event.inputs.create_draft_release != 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUILD_DATE="${{ steps.package.outputs.BUILD_DATE }}"
+          TAG_NAME="snapshot-${BUILD_DATE}"
+          TITLE="Linksys MR7500 NSS Snapshot ${BUILD_DATE} (Private Draft)"
+          
+          # Draft releases are invisible to the public and accessible strictly to repo collaborators/owner
+          gh release create "$TAG_NAME" \
+            "${{ steps.package.outputs.FINAL_ARTIFACT }}" \
+            --title "$TITLE" \
+            --notes-file /home/runner/mr7500-release/BUILD_MANIFEST.txt \
+            --draft
