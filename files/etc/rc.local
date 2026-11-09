@@ -27,13 +27,15 @@
                 uci -q set wireless.radio${idx}.channel='6'
                 uci -q set wireless.radio${idx}.htmode='HE40'
                 uci -q set wireless.default_radio${idx}.ssid='Linksys-MR7500-2.4G'
-                uci -q set wireless.default_radio${idx}.encryption='none'
+                uci -q set wireless.default_radio${idx}.encryption='psk2+ccmp'
+                uci -q set wireless.default_radio${idx}.key='LinksysMR7500!'
                 ;;
             5g)
                 uci -q set wireless.radio${idx}.channel='36'
                 uci -q set wireless.radio${idx}.htmode='HE80'
                 uci -q set wireless.default_radio${idx}.ssid='Linksys-MR7500-5G'
-                uci -q set wireless.default_radio${idx}.encryption='none'
+                uci -q set wireless.default_radio${idx}.encryption='psk2+ccmp'
+                uci -q set wireless.default_radio${idx}.key='LinksysMR7500!'
                 ;;
             6g)
                 # IEEE 802.11ax 6 GHz requires MFP (ieee80211w=2) and OWE or WPA3-SAE
@@ -53,15 +55,13 @@
     fi
 ) >/tmp/mr7500-wifi-init.log 2>&1 &
 
-# Aquantia AQR114C USXGMII in-band auto-negotiation keeper
+# Aquantia AQR114C USXGMII in-band auto-negotiation keeper daemon
 (
     while true; do
-        if [ "$(cat /sys/class/net/wan/carrier 2>/dev/null)" = "1" ]; then
-            val=$(/usr/sbin/phytool read wan/8:4/0xc441 2>/dev/null)
-            if [ "$val" != "0x0008" ]; then
-                logger -t aqr-usxgmii "Enabling USXGMII in-band auto-neg (4:0xc441=0x0008)"
-                /usr/sbin/phytool write wan/8:4/0xc441 0x0008
-            fi
+        val=$(/usr/sbin/phytool read wan/8:4/0xc441 2>/dev/null)
+        if [ "$val" != "0x0008" ]; then
+            logger -t aqr-usxgmii "Enabling USXGMII in-band auto-neg (4:0xc441=0x0008)"
+            /usr/sbin/phytool write wan/8:4/0xc441 0x0008 2>/dev/null || true
         fi
         sleep 2
     done

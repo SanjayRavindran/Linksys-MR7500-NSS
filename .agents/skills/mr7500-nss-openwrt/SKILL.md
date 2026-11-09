@@ -84,3 +84,12 @@ Detailed live telemetry is stored in [work/live_stock_recon_clean.txt](../../../
   * Attach VLANs to physical data-plane ports (e.g. `lan4.100`) rather than bridge interface (`br-lan.100`), as `qca-nss-vlan` requires a valid physical switch port ID.
 * **Linksys Dual-Slot `sysupgrade`:**
   * Use `sysupgrade -s -n /tmp/sysupgrade.bin` when booted from Slot 1 (`boot_part=1`) to upgrade the current active slot without touching Slot 2 fallback.
+* **Wi-Fi RX Path vs NSS Offload (`ath11k nss_offload=0 frame_mode=0`):**
+  * When `ath11k` is loaded with `nss_offload=1 frame_mode=2` on OpenWrt 24.10 / Linux 6.12 with NSS 12.5 on IPQ6018 (512MB RAM), the closed-source `qca-nss-wifili` driver suffers from RX descriptor pool starvation (`rx_desc_no_pb: 321531`), silently discarding all incoming Wi-Fi RX frames (DHCP discovers, ARP replies, DNS queries).
+  * Resolved by configuring `ath11k nss_offload=0 frame_mode=0` in `/etc/modules.d/ath11k`. Wi-Fi frames are processed directly by Linux `mac80211`, while Qualcomm NSS ECM continues to accelerate all routed/NAT packets between `br-lan` and `wan` at full wire speed (944+ Mbps).
+* **Apple iOS / iPadOS IPv6 SLAAC Compatibility:**
+  * Apple devices do not support stateful DHCPv6 address assignment. Setting `ra_flags 'managed-config'` causes iOS/iPadOS to decline IPv6 address configuration.
+  * Resolved by removing `managed-config` and configuring `ra_flags 'other-config'`, `ra_slaac '1'`, and `ra_default '1'` in `/etc/config/dhcp`, enabling RFC 4862 SLAAC with RFC 8106 RDNSS recursive DNS.
+* **LAN Subnet & Gateway Hygiene:**
+  * Interface `lan` must never have `option gateway '192.168.1.1'`. An off-subnet gateway causes modern operating systems (iOS, macOS, Windows) to discard the default router. Default route belongs solely on `wan` via DHCP.
+  * DHCP option 3 (`3,10.143.1.1`) and option 6 (`6,10.143.1.1`) explicitly advertise the router's IP as default gateway and recursive DNS server to all LAN/Wi-Fi clients.
