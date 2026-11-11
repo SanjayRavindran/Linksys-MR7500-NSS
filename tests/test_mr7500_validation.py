@@ -2,7 +2,7 @@
 """
 Automated Hardware & Firmware Validation Test Suite for Linksys MR7500 (OpenWrt + NSS)
 ======================================================================================
-This suite performs an exhaustive 13-point regression test on the Linksys MR7500
+This suite performs an exhaustive 14-point regression test on the Linksys MR7500
 supporting both standard Router Mode and Switch + AP (Dumb AP) Mode.
 
 Usage:
@@ -66,16 +66,19 @@ class MR7500Validator:
         rc, cmdline, _ = self.ssh_exec("cat /proc/cmdline")
         rc, mtd, _ = self.ssh_exec("cat /proc/mtd")
 
-        is_slot1_env = "boot_part=1" in env_out or "ubi.mtd=rootfs" in cmdline
-        has_slot1 = "kernel" in mtd and "rootfs" in mtd
-        has_slot2 = "alt_kernel" in mtd and "alt_rootfs" in mtd
+        slot1_active = "boot_part=1" in env_out and "ubi.mtd=rootfs" in cmdline
+        slot2_active = "boot_part=2" in env_out and "ubi.mtd=alt_rootfs" in cmdline
+        has_slot1 = '"kernel"' in mtd and '"rootfs"' in mtd
+        has_slot2 = '"alt_kernel"' in mtd and '"alt_rootfs"' in mtd
 
-        if is_slot1_env and has_slot1 and has_slot2:
+        if (slot1_active or slot2_active) and has_slot1 and has_slot2:
+            active_num = "1" if slot1_active else "2"
+            alt_num = "2" if slot1_active else "1"
             self.record("TC-01", "Boot Slot & Dual-Partition Layout", "PASS",
-                        "Active slot: Slot 1 (boot_part=1). Slot 2 OEM partitions (mtd15/mtd16) intact.")
+                        f"Active slot: Slot {active_num} (boot_part={active_num}). Dual A/B Slot {alt_num} fallback partition intact.")
         else:
             self.record("TC-01", "Boot Slot & Dual-Partition Layout", "FAIL",
-                        f"Slot 1 active={is_slot1_env}, Slot 1 MTD={has_slot1}, Slot 2 MTD={has_slot2}")
+                        f"env='{env_out.strip()}', cmdline='{cmdline.strip()}', Slot1={has_slot1}, Slot2={has_slot2}")
 
     def test_02_kernel_and_cpu_governors(self):
         rc, uname, _ = self.ssh_exec("uname -r")
@@ -99,18 +102,36 @@ class MR7500Validator:
         has_ecm = "ecm" in lsmod_out
         has_bridge_mgr = "qca_nss_bridge_mgr" in lsmod_out
 
-        if has_drv and has_ecm and has_bridge_mgr:
-            self.record("TC-03", "Qualcomm NSS Hardware Offloading Engine", "PASS",
-                        "qca-nss-drv, ecm, and qca-nss-bridge-mgr active. Hardware L2/L3 acceleration ready.")
+        rc, sys_out, _ = self.ssh_exec(
+            "for k in dev.nss.n2hcfg.extra_pbuf_core0 dev.nss.n2hcfg.n2h_high_water_core0 "
+            "dev.nss.rps.hash_bitmap dev.nss.clock.auto_scale; do sysctl -n $k 2>/dev/null || echo 0; done"
+        )
+        vals = [int(x) for x in sys_out.split() if x.isdigit()]
+        extra_pbuf = vals[0] if len(vals) > 0 else 0
+        high_water = vals[1] if len(vals) > 1 else 0
+        rps_bitmap = vals[2] if len(vals) > 2 else 0
+        auto_scale = vals[3] if len(vals) > 3 else 0
+
+        pbuf_ok = extra_pbuf > 0 and high_water >= 30000 and rps_bitmap == 15 and auto_scale == 1
+        if has_drv and has_ecm and has_bridge_mgr and pbuf_ok:
+            self.record("TC-03", "Qualcomm NSS Hardware Offloading Engine & pbuf/RPS", "PASS",
+                        f"qca-nss-drv, ecm, bridge-mgr active (extra_pbuf={extra_pbuf}, "
+                        f"high_water={high_water}, rps_bitmap={rps_bitmap}, auto_scale={auto_scale}).")
         else:
-            self.record("TC-03", "Qualcomm NSS Hardware Offloading Engine", "FAIL",
-                        f"drv={has_drv}, ecm={has_ecm}, bridge_mgr={has_bridge_mgr}")
+            self.record("TC-03", "Qualcomm NSS Hardware Offloading Engine & pbuf/RPS", "FAIL",
+                        f"drv={has_drv}, ecm={has_ecm}, bridge_mgr={has_bridge_mgr}, "
+                        f"extra_pbuf={extra_pbuf}, high_water={high_water}, rps={rps_bitmap}, auto_scale={auto_scale}")
 
     def test_04_aquantia_wan_and_phyxs_autoneg(self):
         rc, ethtool_out, _ = self.ssh_exec("ethtool wan")
         rc, ethtool_stats, _ = self.ssh_exec("ethtool -S wan")
         rc, carrier_out, _ = self.ssh_exec("cat /sys/class/net/wan/carrier")
         rc_phy, phy_reg, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:4/0xc441 || echo skipped")
+        rc_fw, fw_rev, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:0x1e/0x0020 || echo skipped")
+        rc_dt, aqr_dt, _ = self.ssh_exec(
+            "D=$(find /sys/firmware/devicetree/base -name 'ethernet-phy@8' | head -n1); "
+            "[ -e \"$D/nvmem-cells\" ] && echo nvmem_present || echo fs_only"
+        )
         rc, led_off_out, _ = self.ssh_exec(
             "cat /sys/class/leds/90000.mdio-1:08:green:wan/offloaded "
             "/sys/class/leds/90000.mdio-1:08:orange:wan/offloaded"
@@ -126,15 +147,18 @@ class MR7500Validator:
 
         phy_val = phy_reg.strip().lower()
         phyxs_ok = (phy_val == "skipped") or (phy_val == "0x0008")
+        fw_val = fw_rev.strip().lower()
+        fw_ok = (fw_val == "skipped") or (fw_val == "0x0506")
+        dt_ok = aqr_dt.strip() == "fs_only"
         led_off_vals = led_off_out.split()
         leds_offloaded = len(led_off_vals) == 2 and all(v == "1" for v in led_off_vals)
 
-        if is_link_up and carrier_up and int(speed) >= 1000 and phyxs_ok and leds_offloaded:
-            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN & HW LED Offload", "PASS",
-                        f"Link UP @ {speed} Mb/s Full (carrier=1, 4:0xc441={phy_val}, LEDs offloaded=1/1, rx_frame: {rx_frames}).")
+        if is_link_up and carrier_up and int(speed) >= 1000 and phyxs_ok and fw_ok and dt_ok and leds_offloaded:
+            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN, AQR Guard & HW LEDs", "PASS",
+                        f"Link UP @ {speed} Mb/s Full (4:0xc441={phy_val}, FW={fw_val} [{aqr_dt.strip()}], LEDs offloaded=1/1, rx_frame: {rx_frames}).")
         else:
-            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN & HW LED Offload", "FAIL",
-                        f"Link={is_link_up}, carrier={carrier_out.strip()}, Speed={speed}, 4:0xc441={phy_val}, LED offloaded={led_off_vals}")
+            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN, AQR Guard & HW LEDs", "FAIL",
+                        f"Link={is_link_up}, carrier={carrier_out.strip()}, Speed={speed}, 4:0xc441={phy_val}, FW={fw_val}, DT={aqr_dt.strip()}, LED={led_off_vals}")
 
     def test_05_switch_fabric_and_bridge_ports(self):
         rc, brif_out, _ = self.ssh_exec("ls /sys/class/net/br-lan/brif")
@@ -261,13 +285,21 @@ class MR7500Validator:
                         f"Temps ({len(temps)} zones): {temps}, Watchdog: {wdt_ok}")
 
     def test_12_bluetooth_safe_standby(self):
-        rc, bt_gpio, _ = self.ssh_exec("cat /sys/class/gpio/gpio546/value")
-        if bt_gpio.strip() in ("0", "") or "No such file" in bt_gpio:
+        rc, bt_gpio, _ = self.ssh_exec("cat /sys/class/gpio/gpio546/value 2>/dev/null || echo unexported")
+        rc, dbg_bt, _ = self.ssh_exec("grep bt-reset /sys/kernel/debug/gpio 2>/dev/null || true")
+        rc, tty_msm1, _ = self.ssh_exec("[ -e /dev/ttyMSM1 ] && echo present || echo absent")
+
+        gpio_ok = bt_gpio.strip() in ("0", "unexported", "")
+        hog_ok = (not dbg_bt.strip()) or ("out" in dbg_bt and "lo" in dbg_bt)
+        uart_disabled = tty_msm1.strip() == "absent"
+
+        if gpio_ok and hog_ok and uart_disabled:
+            hog_info = f" ({dbg_bt.strip()})" if dbg_bt.strip() else ""
             self.record("TC-12", "CSR8811 Bluetooth Power-Saving Standby", "PASS",
-                        "GPIO 34 held in hardware reset / unexported. 2.4GHz Wi-Fi SNR protected.")
+                        f"GPIO 34 held in reset{hog_info}, blsp1_uart2 disabled (/dev/ttyMSM1 absent). 2.4GHz SNR protected.")
         else:
             self.record("TC-12", "CSR8811 Bluetooth Power-Saving Standby", "WARN",
-                        f"GPIO 34 state is {bt_gpio.strip()}.")
+                        f"gpio546={bt_gpio.strip()}, bt-reset='{dbg_bt.strip()}', ttyMSM1={tty_msm1.strip()}.")
 
     def test_13_hardware_acceleration_under_traffic(self):
         rc, top, _ = self.ssh_exec("top -b -n 1")
@@ -276,6 +308,25 @@ class MR7500Validator:
 
         self.record("TC-13", "Qualcomm NSS Hardware Offload & Host CPU Idle", "PASS",
                     f"Host CPU state: {cpu_str.strip()}. L2/L3 acceleration active.")
+
+    def test_14_irq_affinity_tuning(self):
+        cmd = (
+            "for i in $(grep -E 'nss_empty_buf_(sos|queue)|DW-PCI-MSI.*(bhi|mhi|ce[0-9]|DP_EXT_IRQ)' "
+            "/proc/interrupts | cut -d: -f1); do "
+            "echo $i:$(cat /proc/irq/$i/smp_affinity 2>/dev/null); done"
+        )
+        rc, out, _ = self.ssh_exec(cmd)
+        entries = [line.strip().split(":") for line in out.splitlines() if ":" in line]
+        unpinned = [e for e in entries if len(e) >= 2 and e[1].strip().lower() in ("1", "01", "f", "0f", "")]
+        if entries and not unpinned:
+            self.record("TC-14", "NSS & Wi-Fi IRQ Affinity Pinning", "PASS",
+                        f"All {len(entries)} monitored NSS empty-buf and QCN9074 PCIe MSIs pinned off CPU 0.")
+        elif not entries:
+            self.record("TC-14", "NSS & Wi-Fi IRQ Affinity Pinning", "FAIL",
+                        "Could not read NSS/PCIe IRQ affinities from /proc/interrupts.")
+        else:
+            self.record("TC-14", "NSS & Wi-Fi IRQ Affinity Pinning", "FAIL",
+                        f"IRQs still on CPU0/default mask: {unpinned[:6]}")
 
     def run_all(self):
         print(f"\n{BOLD}{'='*80}{RESET}")
@@ -298,6 +349,7 @@ class MR7500Validator:
         self.test_11_thermal_sensors_and_watchdog()
         self.test_12_bluetooth_safe_standby()
         self.test_13_hardware_acceleration_under_traffic()
+        self.test_14_irq_affinity_tuning()
 
         print(f"\n{BOLD}{'='*80}{RESET}")
         total = self.passed + self.failed + self.warnings

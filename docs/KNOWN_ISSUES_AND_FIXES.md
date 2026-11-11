@@ -175,3 +175,25 @@ This document compiles all major engineering challenges, bugs, timing races, and
   1. Updated `01_leds` (captured in `patches/0003-qualcommax-mr7500-fix-usxgmii-probe-race-and-wan-leds.patch`) to use `90000.mdio-1:08:green:wan` and omit unsupported `link_10`, enabling hardware LED offload (`offloaded=1`, `0x1e/0xc431=0xc060`, `0x1e/0xc430=0xc06c`).
   2. Guarded `files/etc/uci-defaults/99-mr7500-nss-defaults` with `system.@system[0].mr7500_defaults_applied` and Switch+AP detection so preserved Switch+AP configurations survive `sysupgrade` intact.
 
+---
+
+### Issue 13: `qca-nss-pbuf` Early Exit With `ath11k nss_offload=0`, CPU 0 IRQ Saturation, & SSDK GMAC `IPGT`
+
+* **Severity:** **High** (Starved NSS N2H Pool, Disabled NSS RPS, CPU 0 Saturation, & Sub-Optimal GMAC IPG).
+* **Symptom:** `S95qca-nss-pbuf` logged `Module parameter 'nss_offload=0'. Skipping applying wifi nss configs` and executed `exit 1`, leaving `dev.nss.n2hcfg.extra_pbuf_core0=0`, `n2h_high_water_core0=8704`, and `dev.nss.rps.hash_bitmap=0`, accumulating `n2h_payload_alloc_fails`. Separately, `nss_empty_buf_sos`, `nss_empty_buf_queue`, internal `ath11k_ahb`, and PCIe `QCN9074` MSIs shared CPU 0 alongside `nss_queue0`, and SSDK left PPE GMAC0..3 `MAC_CTRL0.IPGT` at `0x60` instead of Linksys OEM's `0x70`.
+* **Root Cause:** `qca-nss-pbuf.init` treated `ath11k.nss_offload != 1` as fatal for the entire init script rather than only gating `n2h_wifi_pool_buf` and `reload_wifi`; no IRQ affinity service pinned NSS/Wi-Fi IRQs off CPU 0; and `qca-ssdk` left `hppe_mac_ctrl0_ipgt_set` unused.
+* **Permanent Fix (bundled in `patches/0004-qualcommax-mr7500-optimize-pbuf-ipgt-and-cleanup-dts.patch` + rootfs overlay):**
+  1. Patched `package/kernel/mac80211/files/qca-nss-pbuf.init` so `nss_offload=0` logs cleanly and only skips `n2h_wifi_pool_buf` / `wifi up`, allowing `auto_scale=1`, `extra_pbuf_core0=3100000`, `n2h_high_water_core0=30624`, and `dev.nss.rps.hash_bitmap=15` to apply natively on every boot (still controllable via `pbuf.opt.memory_profile='off'`).
+  2. Added standalone reversible `/etc/init.d/mr7500-irq-tune` (`START=96`, toggleable via `uci set nss.general.mr7500_irq_tune=0`) enabled by `99-mr7500-nss-defaults` to pin `nss_queue0..3` (`1,2,4,8`), offload `nss_empty_buf_*` to CPUs 1–2, and round-robin `ath11k_ahb` + `QCN9074` `DW-PCI-MSI` IRQs across CPUs 1–3 (`2,4,8`).
+  3. Added `package/kernel/qca-ssdk/patches/002-hppe-gmac-ipgt-0x70.patch` setting `GMAC_IPGT_VAL=0x70` via `hppe_mac_ctrl0_ipgt_set()` in `_adpt_gmac_port_max_frame_size_set()` for `CPPE_TYPE` (IPQ6018 GMAC0..3).
+
+---
+
+### Issue 14: Dead `&nss_macsec0`, Unused CSR8811 `blsp1_uart2`, & AQR114C DTS NVMEM Downgrade Guard
+
+* **Severity:** **Low / Rebase Guard**.
+* **Symptom:** `ipq6018-mr7500.dts` carried non-functional `&nss_macsec0 { phy_addr = <0x8>; };` (whereas `qca-nss-macsec` only supports QCA808x at `0x18`, not AQR114C at `0x8`) and active `blsp1_uart2` with broken `csr,8811 { enable-gpios = <&tlmm 34 GPIO_ACTIVE_LOW>; }` leaving GPIO 34 floating `in high` while registering unused `/dev/ttyMSM1`.
+* **Root Cause & Fix:** Removed `&nss_macsec0`, `serial1` alias, `hsuart_pins`/`btcoex_pins`, and disabled `&blsp1_uart2` while adding `&tlmm bt_reset_hog` (`gpios = <34 GPIO_ACTIVE_HIGH>; output-low;`) in `0004` to hold CSR8811 physically in reset.
+* **AQR114C DTS NVMEM Guard:** `mtd9` (`0:ethphyfw`) is an SMEM-partitioned flash region outside OpenWrt `kernel`/`rootfs` and retains factory `v5.4.B` even after stock firmware is completely removed. Never re-add `nvmem-cells = <&aqr_fw>` when rebasing against upstream OpenWrt DTS (`ci_test.sh` enforces this), ensuring AQR114C always loads `/lib/firmware/marvell/AQR114C.cld` (`v5.6.5 Cybertan Divo`).
+
+

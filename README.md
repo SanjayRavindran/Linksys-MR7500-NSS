@@ -136,7 +136,7 @@ The 5GbE WAN port requires the Marvell/Aquantia PHY firmware (`AQR114C.cld`, v5.
 
 Run the automated build script:
 ```bash
-./scripts/build.sh
+./scripts/build.sh --profile all   # Builds both router-mode and switch-ap-mode
 ```
 
 The script will:
@@ -158,15 +158,21 @@ Once finished, the compiled images will be located in `bin/targets/qualcommax/ip
 An automated GitHub Actions workflow ([`.github/workflows/build-monthly-snapshot.yml`](.github/workflows/build-monthly-snapshot.yml)) compiles and publishes the latest OpenWrt snapshot with our Qualcomm NSS modifications on the **1st of every month** (`cron: '0 0 1 * *'`), or on-demand via **workflow_dispatch**.
 
 ### Strict Privacy & Proprietary Blob Licensing
-Because compiled firmware images bundle proprietary vendor microcode (**Marvell AQR114C PHY firmware** and **Qualcomm NSS 12.5 binaries**) which are **not licensed for public redistribution**, all compiled binary images are kept strictly private:
-* **Private Actions Artifacts:** Retained for 90 days and downloadable only by the authenticated repository owner.
-* **Private Draft Releases:** Published as Draft Releases (`gh release create --draft`), which are completely invisible to the public and accessible exclusively to repository maintainers.
-* **Optional AES-256 Symmetric GPG Encryption:** By setting the `BUILD_ENCRYPTION_KEY` repository secret, the firmware tarball is encrypted with AES-256 (`.tar.gz.gpg`).
+Because compiled firmware images bundle proprietary vendor microcode (**Marvell AQR114C PHY firmware**, **Qualcomm NSS 12.5 binaries**, and **ath11k Wi-Fi firmware**) which are **not licensed for public redistribution**, all compiled binary images are excluded from Git and kept private:
+* **Private Draft Releases Only by Default:** Unencrypted release archives are published strictly as **Draft Releases** (`gh release create --draft`), which are completely invisible to the public and accessible exclusively to the repository owner.
+* **Optional AES-256 Encrypted Actions Artifacts:** Workflow Actions artifacts are uploaded **only when** `BUILD_ENCRYPTION_KEY` is configured (`aes256` GPG encrypted `.tar.gz.gpg`), preventing unencrypted proprietary blobs from appearing on Actions runs.
 
-### Two-Tier Testing Architecture
-Every build must pass two independent test gates:
-1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 8 gates validating script syntax, DTS nodes, kernel timing patches (`0982`), credential hygiene, router mode defaults, diffconfig symbols, and blob extractor integrity.
-2. **Post-Build Validation ([`scripts/validate_build_artifacts.sh`](scripts/validate_build_artifacts.sh)):** 12 gates verifying binary sizes, SquashFS tar partitions (`kernel`, `root`), board tags (`BOARD=linksys_mr7500`), FIT magic headers (`0xd00dfeed`), and cryptographic SHA-256 sums.
+### Dual-Profile Builds & Ubuntu 26.04 TFTP Flasher
+Each workflow run and `--profile all` local build generates two validated binary variants cleanly separated inside the private release bundle:
+1. **`router-mode/` (Default):** NAT routing (`10.143.1.1/24`, WAN DHCP client, LAN DHCPv4 server, IPv6 SLAAC/NAT66).
+2. **`switch-ap-mode/` (Current Switch+AP Profile):** Unified 5-port LAN bridge (`lan1`–`lan4` + `5GbE wan`, static `192.168.1.91/24`, gateway `192.168.1.1`, local DHCP disabled).
+3. **`flash_mr7500_tftp_ubuntu.sh`:** Bundled user-friendly Ubuntu 24.04 / 26.04 LTS TFTP + HTTP deployment helper (`RFC 1350` + `RFC 2347` `blksize`/`tsize` built-in Python TFTP server; supports zero-flash RAM-boot testing, guided `sysupgrade`, or optional UART automation).
+
+### Multi-Tier Automated Testing Architecture
+Every push and release must pass all automated test gates:
+1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 17 gates validating script syntax, Patches `0001`–`0004`, AQR114C DTS NVMEM downgrade protection (`T3d-AQRGuard`), credential hygiene, Router & Switch+AP profile integrity, TFTP loopback self-test (`T11-TFTPFlasher`), `LICENSE` & `SOURCES_AND_LICENSES.md`, sanitized REA analysis docs, and zero tracked binaries (`T13-NoTrackedBinaries`).
+2. **Upstream Base Patch-Apply Gate:** Clones `qosmio/openwrt-ipq` (`92a2d104145c8d265851c4b388a41bd8e9c21cd9`) on Ubuntu 24.04 and proves all patches apply cleanly before any compilation starts.
+3. **Post-Build Artifact & SquashFS Verification ([`scripts/validate_build_artifacts.sh`](scripts/validate_build_artifacts.sh)):** 15 gates per profile verifying image sizes, SquashFS rootfs contents (`unsquashfs` checks for patched `qca-nss-pbuf`, executable `mr7500-irq-tune`, profile `network`/`dhcp` configs), FIT magic headers, AQR114C FIT DTB protection (`AQR-PROTECTION`), and SHA-256 checksums.
 
 See [`docs/BUILD_PIPELINE.md`](docs/BUILD_PIPELINE.md) for full details on secrets configuration, manual execution, and monthly sysupgrade instructions.
 
@@ -273,7 +279,7 @@ The CSR8811 Bluetooth chip is wired to UART 2 (`blsp1_uart2` / `/dev/ttyMSM1`) a
 
 ## Automated Regression & Rebase Validation Suite
 
-To verify all 13 subsystems after recompiling or rebasing OpenWrt:
+To verify all 14 subsystems after recompiling or rebasing OpenWrt:
 
 ### 1. From Python (Host PC / CI):
 ```bash
@@ -300,12 +306,15 @@ ssh root@10.143.1.1 "sh -s" < scripts/validate_firmware.sh
 * `TC-11`: 7x TSENS thermal monitoring zones & KPSS hardware watchdog.
 * `TC-12`: CSR8811 Bluetooth power-saving hardware reset standby.
 * `TC-13`: Qualcomm NSS ECM silicon fast-path forwarding counters.
+* `TC-14`: NSS empty-buf, ath11k AHB, and QCN9074 PCIe MSI IRQ pinning off CPU 0 (`/etc/init.d/mr7500-irq-tune`).
 
 ---
 
-## Documentation & Runbooks
+## Documentation, Reverse Engineering & Runbooks
 
-Comprehensive technical documentation is organized in [`docs/`](docs/):
+Comprehensive technical documentation is organized in [`docs/`](docs/) and root guides:
+* [`SOURCES_AND_LICENSES.md`](SOURCES_AND_LICENSES.md) — Complete upstream attributions, open-source/proprietary licenses, and legal disclaimers.
+* [`docs/MR7500_REA_BINARY_WORKFLOW_ANALYSIS.md`](docs/MR7500_REA_BINARY_WORKFLOW_ANALYSIS.md) — Clean-room static reverse-engineering analysis (`morluto/rea` + Ghidra 12.1.4 + LLVM) of boot containers, AQR114C mailbox protocol, SSDK/PPE `IPGT`, NSS `pbuf`, Wi-Fi BDF/firmware ISAs, and CSR8811 BT init.
 * [`MONTHLY_UPDATE_GUIDE.md`](MONTHLY_UPDATE_GUIDE.md) — Step-by-step monthly manual update runbook for downloading, verifying, flashing, and testing.
 * [`docs/BUILD_PIPELINE.md`](docs/BUILD_PIPELINE.md) — Automated monthly CI/CD pipeline, private publishing architecture, and sysupgrade runbook.
 * [`docs/KNOWN_ISSUES_AND_FIXES.md`](docs/KNOWN_ISSUES_AND_FIXES.md) — Exhaustive catalog of all 10 major issues, root cause analyses, and permanent fixes.
@@ -320,7 +329,9 @@ Comprehensive technical documentation is organized in [`docs/`](docs/):
 
 ---
 
-## Reference Repositories & Upstream Acknowledgements
+## Reference Repositories, Toolchain & Upstream Acknowledgements
+
+See [`SOURCES_AND_LICENSES.md`](SOURCES_AND_LICENSES.md) for the complete license matrix and non-redistribution disclaimers.
 
 This port builds upon the foundational work of the OpenWrt and Qualcomm NSS open-source communities:
 
@@ -336,11 +347,17 @@ This port builds upon the foundational work of the OpenWrt and Qualcomm NSS open
    * GitHub: [https://github.com/qosmio/nss-packages](https://github.com/qosmio/nss-packages)
 5. **Linux Kernel Firmware Repository:**
    * Git: [https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git)
-6. **Official Linksys Stock Firmware (v1.1.12.216943):**
+6. **OpenWrt Qualcomm SSDK (`openwrt/qca-ssdk`):**
+   * Git: [https://github.com/openwrt/qca-ssdk](https://github.com/openwrt/qca-ssdk)
+7. **Reverse Engineering Agent Framework (`morluto/rea`) & NSA Ghidra:**
+   * REA: [https://github.com/morluto/rea](https://github.com/morluto/rea) | Ghidra (`Apache-2.0`): [https://github.com/NationalSecurityAgency/ghidra](https://github.com/NationalSecurityAgency/ghidra)
+8. **Official Linksys Stock Firmware (v1.1.12.216943):**
    * Download: [https://downloads.linksys.com/support/assets/firmware/FW_MR7500_1.1.12.216943_prod.img](https://downloads.linksys.com/support/assets/firmware/FW_MR7500_1.1.12.216943_prod.img)
 
 ---
 
 ## License
 
-All DTS additions, configuration overlays, helper scripts, and documentation in this repository are licensed under the **GNU General Public License v2.0 (GPL-2.0)** to match upstream OpenWrt.
+All DTS additions, kernel/SSDK patches, configuration overlays, helper scripts, tests, and documentation in this repository are licensed under the **GNU General Public License v2.0 only (`GPL-2.0-only`)** (see [`LICENSE`](LICENSE)) to match upstream OpenWrt.
+
+Proprietary firmware binaries (`AQR114C.cld`, Qualcomm NSS 12.5 & EIP-197 microcode, Qualcomm `ath11k` firmware) remain the property of their respective copyright holders, are **not included in or redistributed by this repository**, and are fetched/extracted strictly on the build host for private personal use.

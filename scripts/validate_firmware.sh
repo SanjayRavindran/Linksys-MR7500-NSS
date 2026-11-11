@@ -24,13 +24,16 @@ else
     echo "Detected Operating Mode: Router Mode"
 fi
 
-# 1. Boot Slot
+# 1. Boot Slot (supports A/B ping-pong upgrades across Slot 1 and Slot 2)
 CMDLINE=$(cat /proc/cmdline)
 MTD=$(cat /proc/mtd)
-if echo "$CMDLINE" | grep -q "ubi.mtd=rootfs" && echo "$MTD" | grep -q "alt_kernel" && echo "$MTD" | grep -q "alt_rootfs"; then
-    log_pass "TC-01" "Boot Slot 1 Active (boot_part=1) & Slot 2 OEM fallback intact"
+BOOT_PART=$(fw_printenv -n boot_part 2>/dev/null || echo "")
+if echo "$CMDLINE" | grep -q "ubi.mtd=rootfs" && echo "$MTD" | grep -q '"alt_kernel"' && echo "$MTD" | grep -q '"alt_rootfs"'; then
+    log_pass "TC-01" "Boot Slot 1 Active (boot_part=${BOOT_PART:-1}) & Dual-Slot A/B fallback (Slot 2) intact"
+elif echo "$CMDLINE" | grep -q "ubi.mtd=alt_rootfs" && echo "$MTD" | grep -q '"kernel"' && echo "$MTD" | grep -q '"rootfs"'; then
+    log_pass "TC-01" "Boot Slot 2 Active (boot_part=${BOOT_PART:-2}) & Dual-Slot A/B fallback (Slot 1) intact"
 else
-    log_fail "TC-01" "Boot Slot / Partition table mismatch"
+    log_fail "TC-01" "Boot Slot / Partition table mismatch (boot_part=$BOOT_PART)"
 fi
 
 # 2. Kernel & CPU
@@ -44,13 +47,18 @@ else
     log_warn "TC-02" "Kernel: $UNAME, Freq: $((FREQ/1000)) MHz, Gov: $GOV, Cores: $CORES"
 fi
 
-# 3. Qualcomm NSS Offload
+# 3. Qualcomm NSS Offload + pbuf/RPS Sysctls
 LSMOD=$(lsmod)
 ECM_ENGINE=$(uci get ecm.global.acceleration_engine 2>/dev/null || echo "none")
-if echo "$LSMOD" | grep -q "qca_nss_drv" && echo "$LSMOD" | grep -q "ecm" && [ "$ECM_ENGINE" = "nss" ]; then
-    log_pass "TC-03" "Qualcomm NSS Core 0 driver & ECM active (engine: $ECM_ENGINE)"
+EXTRA_PBUF=$(sysctl -n dev.nss.n2hcfg.extra_pbuf_core0 2>/dev/null || echo "0")
+HIGH_WATER=$(sysctl -n dev.nss.n2hcfg.n2h_high_water_core0 2>/dev/null || echo "0")
+RPS_MAP=$(sysctl -n dev.nss.rps.hash_bitmap 2>/dev/null || echo "0")
+AUTO_SCALE=$(sysctl -n dev.nss.clock.auto_scale 2>/dev/null || echo "0")
+if echo "$LSMOD" | grep -q "qca_nss_drv" && echo "$LSMOD" | grep -q "ecm" && [ "$ECM_ENGINE" = "nss" ] && \
+   [ "$EXTRA_PBUF" -gt 0 ] && [ "$HIGH_WATER" -ge 30000 ] && [ "$RPS_MAP" -eq 15 ] && [ "$AUTO_SCALE" -eq 1 ]; then
+    log_pass "TC-03" "NSS Core 0 & ECM active (engine: $ECM_ENGINE, extra_pbuf=$EXTRA_PBUF, high_water=$HIGH_WATER, rps=$RPS_MAP, auto_scale=$AUTO_SCALE)"
 else
-    log_fail "TC-03" "NSS offload modules missing or acceleration engine is not 'nss'"
+    log_fail "TC-03" "NSS modules/pbuf mismatch (engine=$ECM_ENGINE, extra_pbuf=$EXTRA_PBUF, high_water=$HIGH_WATER, rps=$RPS_MAP, auto_scale=$AUTO_SCALE)"
 fi
 
 # 4. Multi-Gigabit 5G Port (AQR114C) + USXGMII AN + Hardware LED Offload
@@ -60,17 +68,25 @@ LED_GREEN_OFF=$(cat /sys/class/leds/90000.mdio-1:08:green:wan/offloaded 2>/dev/n
 LED_ORANGE_OFF=$(cat /sys/class/leds/90000.mdio-1:08:orange:wan/offloaded 2>/dev/null || echo "0")
 PHYXS_AN="skipped"
 PHYXS_OK=1
+AQR_FW="skipped"
+AQR_OK=1
 if command -v phytool >/dev/null 2>&1; then
     PHYXS_AN=$(phytool read wan/8:4/0xc441 2>/dev/null | tr -d '[:space:]')
     echo "$PHYXS_AN" | grep -qi "^0x0008$" || PHYXS_OK=0
+    AQR_FW=$(phytool read wan/8:0x1e/0x0020 2>/dev/null | tr -d '[:space:]')
+    echo "$AQR_FW" | grep -qi "^0x0506$" || AQR_OK=0
 fi
+AQR_DT_NODE=$(find /sys/firmware/devicetree/base -name "ethernet-phy@8" 2>/dev/null | head -n1)
+AQR_DT_OK=1
+[ -n "$AQR_DT_NODE" ] && [ -e "$AQR_DT_NODE/nvmem-cells" ] && AQR_DT_OK=0
 if echo "$ETH_WAN" | grep -q "Link detected: yes" && [ "$WAN_CARRIER" = "1" ] && \
-   [ "$PHYXS_OK" -eq 1 ] && [ "$LED_GREEN_OFF" = "1" ] && [ "$LED_ORANGE_OFF" = "1" ]; then
+   [ "$PHYXS_OK" -eq 1 ] && [ "$AQR_OK" -eq 1 ] && [ "$AQR_DT_OK" -eq 1 ] && \
+   [ "$LED_GREEN_OFF" = "1" ] && [ "$LED_ORANGE_OFF" = "1" ]; then
     SPEED=$(echo "$ETH_WAN" | grep "Speed:" | awk '{print $2}')
     RX_FRAMES=$(ethtool -S wan 2>/dev/null | grep "rx_frame:" | awk '{print $2}')
-    log_pass "TC-04" "AQR114C 5G Link UP @ $SPEED Full (carrier=$WAN_CARRIER, 4:c441=$PHYXS_AN, LEDs offloaded=1/1, rx_frame: $RX_FRAMES)"
+    log_pass "TC-04" "AQR114C 5G Link UP @ $SPEED Full (4:c441=$PHYXS_AN, FW=$AQR_FW [FS only], LEDs offloaded=1/1, rx_frame: $RX_FRAMES)"
 else
-    log_fail "TC-04" "5G WAN failed (link=$(echo "$ETH_WAN" | grep "Link detected:" | awk '{print $3}'), carrier=$WAN_CARRIER, 4:c441=$PHYXS_AN, offloaded=${LED_GREEN_OFF}/${LED_ORANGE_OFF})"
+    log_fail "TC-04" "5G WAN failed (link=$(echo "$ETH_WAN" | grep "Link detected:" | awk '{print $3}'), carrier=$WAN_CARRIER, 4:c441=$PHYXS_AN, FW=$AQR_FW, dt_fs_only=$AQR_DT_OK, offloaded=${LED_GREEN_OFF}/${LED_ORANGE_OFF})"
 fi
 
 # 5. Switch Fabric & Bridge Ports (QCA8075 + AQR114C)
@@ -173,15 +189,35 @@ fi
 
 # 12. Bluetooth CSR8811 Standby
 BT_VAL=$(cat /sys/class/gpio/gpio546/value 2>/dev/null || echo "unexported")
-if [ "$BT_VAL" = "0" ] || [ "$BT_VAL" = "unexported" ]; then
-    log_pass "TC-12" "CSR8811 Bluetooth held in reset (GPIO 34 = $BT_VAL), 2.4GHz RF protected"
+BT_HOG=$(grep "bt-reset" /sys/kernel/debug/gpio 2>/dev/null || true)
+HOG_OK=1
+[ -n "$BT_HOG" ] && ! echo "$BT_HOG" | grep -qE "out.*lo" && HOG_OK=0
+if { [ "$BT_VAL" = "0" ] || [ "$BT_VAL" = "unexported" ]; } && [ "$HOG_OK" -eq 1 ] && [ ! -e /dev/ttyMSM1 ]; then
+    log_pass "TC-12" "CSR8811 Bluetooth held in reset (GPIO 34=$BT_VAL${BT_HOG:+, $BT_HOG}), blsp1_uart2 disabled"
 else
-    log_warn "TC-12" "Bluetooth GPIO state: $BT_VAL"
+    log_warn "TC-12" "Bluetooth state anomaly (GPIO 34=$BT_VAL, hog='$BT_HOG', ttyMSM1=$([ -e /dev/ttyMSM1 ] && echo present || echo absent))"
 fi
 
 # 13. NSS Accelerated Flows
 ACC_FLOWS=$(cat /sys/kernel/debug/ecm/ecm_nss_ipv4/accelerated_count 2>/dev/null || echo "0")
 log_pass "TC-13" "Active Qualcomm NSS hardware offload flows: $ACC_FLOWS"
+
+# 14. NSS & Wi-Fi IRQ Affinity Pinning
+IRQ_CHECK=$(grep -E 'nss_empty_buf_(sos|queue)|DW-PCI-MSI.*(bhi|mhi|ce[0-9]|DP_EXT_IRQ)' /proc/interrupts | cut -d: -f1)
+IRQ_BAD=0
+IRQ_CNT=0
+for irq in $IRQ_CHECK; do
+    aff=$(cat "/proc/irq/$irq/smp_affinity" 2>/dev/null || echo "")
+    IRQ_CNT=$((IRQ_CNT + 1))
+    case "$aff" in
+        ""|1|01|f|0f|F|0F) IRQ_BAD=$((IRQ_BAD + 1)) ;;
+    esac
+done
+if [ "$IRQ_CNT" -gt 0 ] && [ "$IRQ_BAD" -eq 0 ]; then
+    log_pass "TC-14" "All $IRQ_CNT NSS empty-buf and QCN9074 PCIe MSIs pinned off CPU 0"
+else
+    log_fail "TC-14" "IRQ affinity pinning incomplete ($IRQ_BAD/$IRQ_CNT unpinned or stuck on CPU 0)"
+fi
 
 echo "================================================================================"
 TOTAL=$((PASS+FAIL+WARN))

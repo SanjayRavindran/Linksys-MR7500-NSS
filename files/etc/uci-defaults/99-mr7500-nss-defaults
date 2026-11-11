@@ -54,6 +54,7 @@ fi
 # 5. Configure NSS dynamic RPS and 512MB pbuf auto-scaling
 if [ -f /etc/config/nss ]; then
     uci -q set nss.general.enable_rps='1'
+    [ -z "$(uci -q get nss.general.mr7500_irq_tune)" ] && uci -q set nss.general.mr7500_irq_tune='1'
     uci -q commit nss
 fi
 
@@ -70,7 +71,7 @@ if [ -f /etc/modules.d/ath11k ]; then
 fi
 
 # 7. Enable NSS init services on boot
-for svc in skb_recycler qca-nss-ecm qca-nss-drv qca-nss-pbuf; do
+for svc in skb_recycler qca-nss-ecm qca-nss-drv qca-nss-pbuf mr7500-irq-tune; do
     if [ -x "/etc/init.d/$svc" ]; then
         /etc/init.d/"$svc" enable 2>/dev/null || true
     fi

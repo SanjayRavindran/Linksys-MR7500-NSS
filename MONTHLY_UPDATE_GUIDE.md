@@ -10,7 +10,7 @@ This runbook is a step-by-step guide to updating your Linksys MR7500 router each
 |---|---|
 | **Pipeline Schedule** | 1st of every month at `00:00 UTC` (`cron: '0 0 1 * *'`) |
 | **Manual Trigger** | GitHub Web UI → **Actions** → **Build Monthly Snapshot Firmware (Private)** → **Run workflow** |
-| **Default Mode** | **Router Mode** (`10.143.1.1/24`, WAN DHCP client, LAN DHCP server active) |
+| **Included Variants** | Both **`router-mode/`** (`10.143.1.1/24`) and **`switch-ap-mode/`** (`192.168.1.91/24`, 5-port bridge) |
 | **Mode Switcher** | `/usr/sbin/switch_mode [router|ap]` pre-installed on device |
 | **Current AP IP** | `https://192.168.1.91/` (Switch + AP Mode) |
 | **Fallback IP** | `https://10.143.1.1/` (Router Mode / VM Access) |
@@ -59,7 +59,23 @@ openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin: OK
 
 ---
 
-## Step 3: Flash Sysupgrade to the Router
+## Step 3: Flash Firmware to the Router
+
+Every private release archive bundles **both** configuration variants plus an interactive Ubuntu 24.04 / 26.04 TFTP flasher:
+* `router-mode/` — Default NAT Router (`10.143.1.1/24`, WAN DHCP client, LAN DHCPv4 + SLAAC).
+* `switch-ap-mode/` — Your current Switch + AP config (`192.168.1.91/24`, all 5 ports bridged, DHCP disabled).
+* `flash_mr7500_tftp_ubuntu.sh` — Ubuntu 24.04 / 26.04 TFTP + HTTP flash utility.
+
+### Option TFTP (Ubuntu 24.04 / 26.04 Recovery or Fresh Install):
+```bash
+# Flash Switch+AP build (or pass --variant router):
+sudo ./flash_mr7500_tftp_ubuntu.sh --variant switch-ap
+
+# Or test in RAM only without modifying NAND:
+sudo ./flash_mr7500_tftp_ubuntu.sh --variant router --mode ramboot
+```
+
+### Option Sysupgrade (Existing OpenWrt Router):
 
 You only need `openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin`.
 
@@ -129,7 +145,7 @@ To switch back to **Router Mode** at any time:
 
 ## Step 5: Post-Upgrade Health Check & Verification
 
-Run the automated validation suites to ensure all 13 hardware subsystems, NSS acceleration flows, and Wi-Fi 6E radios are working at 100%:
+Run the automated validation suites to ensure all 14 hardware subsystems, NSS acceleration flows, and Wi-Fi 6E radios are working at 100%:
 
 ### 1. Remote Python Test Suite (from Windows PC):
 ```bash
@@ -155,6 +171,7 @@ ssh root@192.168.1.91 "sh -s" < scripts/validate_firmware.sh
 - `TC-10`: USB 3.0 DWC3 SuperSpeed Host: `PASS`
 - `TC-12`: CSR8811 Bluetooth Standby (GPIO 34 low): `PASS`
 - `TC-13`: Qualcomm NSS Hardware Accelerated Flows: `PASS`
+- `TC-14`: NSS & Wi-Fi IRQ Affinity Pinning (off CPU 0): `PASS`
 
 ---
 

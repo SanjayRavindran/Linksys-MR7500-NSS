@@ -1,0 +1,5 @@
+#!/bin/sh
+uci -q set system.@system[0].hostname='MR7500'
+uci -q commit system
+/etc/init.d/odhcpd disable 2>/dev/null || true
+exit 0

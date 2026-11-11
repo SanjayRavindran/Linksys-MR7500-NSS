@@ -1,0 +1,86 @@
+#!/bin/sh /etc/rc.common
+# Pin NSS, ath11k AHB, and QCN9074 PCIe MSIs cleanly off CPU 0 for throughput stability.
+# Toggle via UCI: uci set nss.general.mr7500_irq_tune=0 && /etc/init.d/mr7500-irq-tune stop
+
+START=96
+NAME=mr7500-irq-tune
+
+WIFI_IRQ_PATTERN='(GIC-0.*(ce[0-9]|wbm2host|rxdma2host|host2rxdma|reo2host|ppdu-end)|DW-PCI-MSI.*(bhi|mhi|ce[0-9]|DP_EXT_IRQ))'
+
+set_irq_mask() {
+	local irq="$1" mask="$2"
+	[ -n "$irq" ] && [ -w "/proc/irq/$irq/smp_affinity" ] || return 0
+	echo "$mask" > "/proc/irq/$irq/smp_affinity" 2>/dev/null || true
+}
+
+get_irqs_matching() {
+	local pattern="$1"
+	awk -v pat="$pattern" -F: '
+		$0 ~ pat {
+			gsub(/^[ \t]+|[ \t]+$/, "", $1)
+			if ($1 ~ /^[0-9]+$/) print $1
+		}
+	' /proc/interrupts
+}
+
+apply_pinning() {
+	local irq idx mask_val
+
+	# Dedicate NSS Tx/Rx ring queues 0..3 across all 4 Cortex-A53 cores
+	set_irq_mask "$(get_irqs_matching 'nss_queue0$')" 1
+	set_irq_mask "$(get_irqs_matching 'nss_queue1$')" 2
+	set_irq_mask "$(get_irqs_matching 'nss_queue2$')" 4
+	set_irq_mask "$(get_irqs_matching 'nss_queue3$')" 8
+
+	# Offload high-rate NSS empty-buffer interrupts away from CPU 0
+	set_irq_mask "$(get_irqs_matching 'nss_empty_buf_queue$')" 2
+	set_irq_mask "$(get_irqs_matching 'nss_empty_buf_sos$')" 4
+
+	# Distribute ath11k AHB (IPQ6018) and PCIe (QCN9074 DW-PCI-MSI) IRQs across CPUs 1..3
+	idx=0
+	for irq in $(get_irqs_matching "$WIFI_IRQ_PATTERN"); do
+		case $((idx % 3)) in
+			0) mask_val=2 ;;
+			1) mask_val=4 ;;
+			2) mask_val=8 ;;
+		esac
+		set_irq_mask "$irq" "$mask_val"
+		idx=$((idx + 1))
+	done
+}
+
+start() {
+	local enabled
+	enabled="$(uci -q get nss.general.mr7500_irq_tune 2>/dev/null)"
+	if [ "$enabled" = "0" ]; then
+		logger -t "$NAME" "Disabled via UCI (nss.general.mr7500_irq_tune=0); skipping IRQ affinity pinning"
+		return 0
+	fi
+
+	apply_pinning
+
+	# If QCN9074 PCIe MHI/ath11k_pci finishes async probe shortly after boot, re-pin once
+	if ! grep -q 'DP_EXT_IRQ' /proc/interrupts 2>/dev/null; then
+		(
+			i=0
+			while [ "$i" -lt 15 ]; do
+				sleep 1
+				if grep -q 'DP_EXT_IRQ' /proc/interrupts 2>/dev/null; then
+					apply_pinning
+					break
+				fi
+				i=$((i + 1))
+			done
+		) >/dev/null 2>&1 &
+	fi
+
+	logger -t "$NAME" "Applied NSS, ath11k AHB, and QCN9074 PCIe IRQ affinity pinning (offloading CPU 0)"
+}
+
+stop() {
+	local irq
+	for irq in $(get_irqs_matching "(nss_queue[0-3]|nss_empty_buf_queue|nss_empty_buf_sos|$WIFI_IRQ_PATTERN)"); do
+		set_irq_mask "$irq" "f"
+	done
+	logger -t "$NAME" "Reset NSS and Wi-Fi IRQ affinities to default (0xf)"
+}

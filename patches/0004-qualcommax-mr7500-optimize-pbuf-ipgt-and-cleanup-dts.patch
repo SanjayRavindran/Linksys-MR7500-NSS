@@ -1,0 +1,157 @@
+From: Linksys MR7500 NSS Maintainer <mr7500-nss@local>
+Subject: [PATCH 4/4] qualcommax: mr7500: enable pbuf/RPS with host ath11k, tune GMAC IPGT 0x70, cleanup DTS
+
+1. package/kernel/mac80211/files/qca-nss-pbuf.init: Do not exit early when
+   ath11k nss_offload=0; keep skipping n2h_wifi_pool_buf while applying
+   dev.nss.clock.auto_scale, n2h_queue_limit_core0/1, extra_pbuf_core0=3100000,
+   n2h_high_water_core0=30624, and dev.nss.rps.hash_bitmap=15 on every boot.
+2. package/kernel/qca-ssdk/patches/002-hppe-gmac-ipgt-0x70.patch: Replicate
+   stock firmware IPGT=0x70 on CPPE (IPQ6018) PPE GMAC0..3 ports.
+3. target/linux/qualcommax/dts/ipq6018-mr7500.dts: Remove non-functional
+   &nss_macsec0 (phy_addr 0x8 is AQR114C, not QCA808x) and cleanly disable
+   broken CSR8811 blsp1_uart2 while holding GPIO 34 low via tlmm gpio-hog.
+
+---
+diff --git a/package/kernel/qca-ssdk/patches/002-hppe-gmac-ipgt-0x70.patch b/package/kernel/qca-ssdk/patches/002-hppe-gmac-ipgt-0x70.patch
+new file mode 100644
+--- /dev/null
++++ b/package/kernel/qca-ssdk/patches/002-hppe-gmac-ipgt-0x70.patch
+@@ -0,0 +1,21 @@
++--- a/src/adpt/hppe/adpt_hppe_portctrl.c
+++++ b/src/adpt/hppe/adpt_hppe_portctrl.c
++@@ -99,6 +99,7 @@
++ #define PHY_PORT_TO_BM_PORT(port)	(port + 7)
++ #define GMAC_IPG_CHECK          0xc
++ #define XGMAC_LPI_ENTRY_TIMER   0x2c
+++#define GMAC_IPGT_VAL           0x70
++ 
++ /* This register is used to adjust the write timing for reserving
++  * some bandwidth of the memory to read operation.
++@@ -368,6 +369,10 @@ _adpt_gmac_port_max_frame_size_set(a_uint32_t dev_id, fal_port_t port_id,
++ 	rv |= hppe_mac_ctrl2_crs_sel_set(dev_id, port_id, CARRIER_SENSE_SIGNAL_FROM_MAC);
++ 	rv |= hppe_mac_dbg_ctrl_hihg_ipg_set(dev_id, port_id, GMAC_IPG_CHECK);
++ 	rv |= hppe_mac_ctrl2_mac_tx_thd_set(dev_id, port_id, GMAC_TX_THD);
+++#ifdef CPPE
+++	if (adpt_ppe_type_get(dev_id) == CPPE_TYPE)
+++		rv |= hppe_mac_ctrl0_ipgt_set(dev_id, port_id, GMAC_IPGT_VAL);
+++#endif
++ 
++ 	return rv;
++ }
+diff --git a/package/kernel/mac80211/files/qca-nss-pbuf.init b/package/kernel/mac80211/files/qca-nss-pbuf.init
+--- a/package/kernel/mac80211/files/qca-nss-pbuf.init
++++ b/package/kernel/mac80211/files/qca-nss-pbuf.init
+@@ -44,8 +44,10 @@
+ 
+   sysctl -w dev.nss.n2hcfg.n2h_high_water_core0="$n2h_high_water_core0" > /dev/null 2>&1
+ 
+-  logger -t $NAME "$board - setting dev.nss.n2hcfg.n2h_wifi_pool_buf=$n2h_wifi_pool_buf"
+-  sysctl -w dev.nss.n2hcfg.n2h_wifi_pool_buf="$n2h_wifi_pool_buf" > /dev/null 2>&1
++  if [ "${enable_nss_offload:-0}" -eq 1 ]; then
++    logger -t $NAME "$board - setting dev.nss.n2hcfg.n2h_wifi_pool_buf=$n2h_wifi_pool_buf"
++    sysctl -w dev.nss.n2hcfg.n2h_wifi_pool_buf="$n2h_wifi_pool_buf" > /dev/null 2>&1
++  fi
+ 
+   logger -t $NAME "$board - setting dev.nss.n2hcfg.n2h_high_water_core0=$n2h_high_water_core0"
+   sysctl -w dev.nss.n2hcfg.n2h_high_water_core0="$n2h_high_water_core0" > /dev/null 2>&1
+@@ -56,16 +58,14 @@
+   local auto_scale n2h_queue_limit_core0 n2h_queue_limit_core1 num_cpus
+   local hash_bitmap
+ 
+-  if [ ! -r /sys/module/ath11k/parameters/nss_offload ]; then
+-    logger -t $NAME "Module parameter '/sys/module/ath11k/parameters/nss_offload' does NOT exist. Skipping applying wifi nss configs"
+-    exit 1
++  enable_nss_offload=0
++  if [ -r /sys/module/ath11k/parameters/nss_offload ]; then
++    enable_nss_offload=$(cat /sys/module/ath11k/parameters/nss_offload 2> /dev/null)
++    enable_nss_offload="${enable_nss_offload:-0}"
+   fi
+ 
+-  enable_nss_offload=$(cat /sys/module/ath11k/parameters/nss_offload)
+-
+-  if [ "$enable_nss_offload" -ne "1" ]; then
+-    logger -t $NAME -s user.warn "Module parameter 'nss_offload=0'. Skipping applying wifi nss configs"
+-    exit 1
++  if [ "$enable_nss_offload" -ne 1 ]; then
++    logger -t $NAME "ath11k nss_offload=$enable_nss_offload; applying core NSS pbuf/RPS settings without n2h_wifi_pool_buf"
+   fi
+ 
+   [ ! -d "/proc/sys/dev/nss/rps" ] && {
+diff --git a/target/linux/qualcommax/dts/ipq6018-mr7500.dts b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+--- a/target/linux/qualcommax/dts/ipq6018-mr7500.dts
++++ b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+@@ -17,7 +17,6 @@
+ 
+ 	aliases {
+ 		serial0 = &blsp1_uart3;
+-		serial1 = &blsp1_uart2;
+ 
+ 		led-boot = &led_system_blue;
+ 		led-running = &led_system_blue;
+@@ -174,32 +173,11 @@
+ 		};
+ 	};
+ 
+-	hsuart_pins: hsuart_pins {
+-		pins = "gpio71", "gpio72", "gpio69", "gpio70";
+-		function = "blsp1_uart";
+-		drive-strength = <8>;
+-		bias-disable;
+-	};
+-
+-	btcoex_pins: btcoex_pins {
+-		mux_0 {
+-			pins = "gpio51";
+-			function = "pta1_1";
+-			drive-strength = <6>;
+-			bias-pull-down;
+-		};
+-		mux_1 {
+-			pins = "gpio53";
+-			function = "pta1_0";
+-			drive-strength = <6>;
+-			bias-pull-down;
+-		};
+-		mux_2 {
+-			pins = "gpio52";
+-			function = "pta1_2";
+-			drive-strength = <6>;
+-			bias-pull-down;
+-		};
++	bt_reset_hog {
++		gpio-hog;
++		gpios = <34 GPIO_ACTIVE_HIGH>;
++		output-low;
++		line-name = "bt-reset";
+ 	};
+ };
+ 
+@@ -440,15 +418,8 @@
+ };
+ 
+ &blsp1_uart2 {
+-	pinctrl-0 = <&hsuart_pins &btcoex_pins>;
+-	pinctrl-names = "default";
+-	dmas = <&blsp_dma 2>, <&blsp_dma 3>;
+-	dma-names = "tx", "rx";
+-	status = "okay";
+-	bluetooth { // doesn't work
+-		compatible = "csr,8811";
+-		enable-gpios = <&tlmm 34 GPIO_ACTIVE_LOW>;
+-	};
++	/* CSR8811 BT disabled; held in hardware reset via tlmm bt_reset_hog (GPIO 34 low) */
++	status = "disabled";
+ };
+ 
+ &qpic_bam {
+@@ -522,10 +493,6 @@
+ 	status = "okay";
+ };
+ 
+-&nss_macsec0 {
+-	phy_addr = <0x8>;
+-};
+-
+ &pcie0 {
+ 	status = "okay";
+ 

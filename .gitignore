@@ -29,3 +29,7 @@ feeds/
 Thumbs.db
 *.swp
 *.bak
+
+# Python bytecode
+__pycache__/
+*.py[cod]

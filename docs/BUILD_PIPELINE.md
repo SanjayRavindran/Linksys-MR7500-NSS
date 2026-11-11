@@ -33,9 +33,8 @@ The GitHub Actions workflow is defined in [`.github/workflows/build-monthly-snap
 > These proprietary binaries are **not licensed for public redistribution**. While the source code, patches, DTS definitions, and documentation in this repository are 100% open-source under GPL-2.0, **the compiled binary images must never be published publicly**.
 
 ### Multi-Tier Privacy Enforcement:
-1. **GitHub Actions Workflow Artifacts:**
-   - Artifacts uploaded via `actions/upload-artifact@v4` are retained for up to 90 days.
-   - On GitHub, actions artifacts are downloadable only by authenticated users who have repository access.
+1. **GitHub Actions Workflow Artifacts (Encrypted Only):**
+   - Uploaded **only when** `BUILD_ENCRYPTION_KEY` is configured (`aes256` GPG `.tar.gz.gpg`), preventing unencrypted vendor blobs from appearing on Actions runs.
 2. **Private Draft Releases:**
    - The workflow creates releases using GitHub CLI with `--draft` (`gh release create ... --draft`).
    - On GitHub, **Draft Releases are completely hidden from the public**. Anonymous visitors and normal users navigating to the releases page will see a 404 / empty page. Only the repository owner and maintainers with push permissions can view and download draft release assets.
@@ -50,7 +49,7 @@ The GitHub Actions workflow is defined in [`.github/workflows/build-monthly-snap
 
 ## 3. Pre-Build Automated Test Suite (`scripts/ci_test.sh`)
 
-Before a single compiler thread is spawned, the workflow executes the pre-build test suite in [`scripts/ci_test.sh`](../scripts/ci_test.sh) on a clean Ubuntu runner:
+Before a single compiler thread is spawned, the workflow executes the 17-gate pre-build test suite in [`scripts/ci_test.sh`](../scripts/ci_test.sh) plus a live upstream patch-apply check against `qosmio/openwrt-ipq` (`92a2d104`) on Ubuntu 24.04:
 
 | Test ID | Test Name | Purpose & Verification Criteria |
 |---|---|---|
@@ -63,13 +62,13 @@ Before a single compiler thread is spawned, the workflow executes the pre-build 
 | **T7** | **Stock Blob Extractor Verification** | Verifies that `scripts/extract_stock_blobs.sh` checks the official SHA-256 checksum (`32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`) for `AQR114C.cld`. |
 | **T8** | **Firewall Hook Robustness** | Verifies `/etc/firewall.d/qca-nss-ecm` includes an nft chain check to prevent syntax errors when operating in Switch+AP mode. |
 
-If any of these 8 checks fail, the workflow terminates immediately, preventing unnecessary runner usage.
+If any of these 17 checks fail, the workflow terminates immediately, preventing unnecessary runner usage.
 
 ---
 
 ## 4. Post-Build Binary Artifacts Validation (`scripts/validate_build_artifacts.sh`)
 
-Once compilation finishes, [`scripts/validate_build_artifacts.sh`](../scripts/validate_build_artifacts.sh) performs 12 comprehensive structural and cryptographic checks on the generated binaries:
+Once compilation finishes, [`scripts/validate_build_artifacts.sh`](../scripts/validate_build_artifacts.sh) performs 15 comprehensive structural (including `unsquashfs` profile + AQR114C DTB protection) and cryptographic checks on the generated binaries:
 
 1. **Existence Verification:** Confirms all 3 required images and checksum files exist:
    - `openwrt-qualcommax-ipq60xx-linksys_mr7500-squashfs-sysupgrade.bin`

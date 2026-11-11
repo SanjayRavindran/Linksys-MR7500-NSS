@@ -13,4 +13,4 @@ Run the extraction script to download the official stock Linksys firmware and ex
 ### Verification:
 * **Filename:** `AQR114C.cld`
 * **Size:** `393,218` bytes (v5.6.5 Cybertan Divo)
-* **SHA-256:** `8a0e88cf738a0b07e602495d43be6c13fe6272551527efd04b6df00d3cb12eb6`
+* **SHA-256:** `32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`
