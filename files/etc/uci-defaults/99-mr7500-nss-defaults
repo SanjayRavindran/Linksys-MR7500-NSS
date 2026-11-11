@@ -1,37 +1,48 @@
 #!/bin/sh
 # Enable Qualcomm NSS L2/L3/NAT/PPPoE/VLAN/Bridge + ECM hardware acceleration on Linksys MR7500
 
-# 1. Set default LAN IP to 10.143.1.1/24 (matches Linksys factory subnet & avoids 192.168.1.0/24 upstream WAN collision)
-uci -q del network.lan.ipaddr
-uci -q del network.lan.gateway
-uci -q set network.lan.ipaddr='10.143.1.1'
-uci -q set network.lan.netmask='255.255.255.0'
-uci -q set network.lan.broadcast='10.143.1.255'
-uci -q set network.globals.packet_steering='0'
-uci -q del network.globals.steering_flows
-uci -q commit network
+ALREADY_APPLIED=$(uci -q get system.@system[0].mr7500_defaults_applied)
+IS_AP_MODE=0
+if [ "$(uci -q get dhcp.lan.ignore)" = "1" ] && [ -z "$(uci -q get network.wan)" ]; then
+    IS_AP_MODE=1
+fi
 
-# 2. Configure DHCPv4 server & IPv6 SLAAC (RFC 4862 SLAAC + RDNSS for Apple iOS/iPadOS & modern clients)
-uci -q set dhcp.lan.start='100'
-uci -q set dhcp.lan.limit='150'
-uci -q set dhcp.lan.leasetime='12h'
-uci -q set dhcp.lan.force='1'
-uci -q del dhcp.lan.dhcp_option
-uci -q add_list dhcp.lan.dhcp_option='3,10.143.1.1'
-uci -q add_list dhcp.lan.dhcp_option='6,10.143.1.1'
-uci -q del dhcp.lan.ra_flags
-uci -q add_list dhcp.lan.ra_flags='other-config'
-uci -q set dhcp.lan.ra_slaac='1'
-uci -q set dhcp.lan.ra_default='1'
-uci -q set dhcp.lan.ra='server'
-uci -q set dhcp.lan.dhcpv6='server'
-uci -q commit dhcp
+if [ "$ALREADY_APPLIED" != "1" ] && [ "$IS_AP_MODE" != "1" ]; then
+    # 1. Set default LAN IP to 10.143.1.1/24 (matches Linksys factory subnet & avoids 192.168.1.0/24 upstream WAN collision)
+    uci -q del network.lan.ipaddr
+    uci -q del network.lan.gateway
+    uci -q set network.lan.ipaddr='10.143.1.1'
+    uci -q set network.lan.netmask='255.255.255.0'
+    uci -q set network.lan.broadcast='10.143.1.255'
+    uci -q set network.globals.packet_steering='0'
+    uci -q del network.globals.steering_flows
+    uci -q commit network
 
-# 3. Disable conflicting software flow offloading in fw4 & enable NAT66 masquerading
-uci -q set firewall.@defaults[0].flow_offloading='0'
-uci -q set firewall.@defaults[0].flow_offloading_hw='0'
-uci -q set firewall.@zone[1].masq6='1'
-uci -q commit firewall
+    # 2. Configure DHCPv4 server & IPv6 SLAAC (RFC 4862 SLAAC + RDNSS for Apple iOS/iPadOS & modern clients)
+    uci -q set dhcp.lan.start='100'
+    uci -q set dhcp.lan.limit='150'
+    uci -q set dhcp.lan.leasetime='12h'
+    uci -q set dhcp.lan.force='1'
+    uci -q del dhcp.lan.dhcp_option
+    uci -q add_list dhcp.lan.dhcp_option='3,10.143.1.1'
+    uci -q add_list dhcp.lan.dhcp_option='6,10.143.1.1'
+    uci -q del dhcp.lan.ra_flags
+    uci -q add_list dhcp.lan.ra_flags='other-config'
+    uci -q set dhcp.lan.ra_slaac='1'
+    uci -q set dhcp.lan.ra_default='1'
+    uci -q set dhcp.lan.ra='server'
+    uci -q set dhcp.lan.dhcpv6='server'
+    uci -q commit dhcp
+
+    # 3. Disable conflicting software flow offloading in fw4 & enable NAT66 masquerading
+    uci -q set firewall.@defaults[0].flow_offloading='0'
+    uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+    uci -q set firewall.@zone[1].masq6='1'
+    uci -q commit firewall
+fi
+
+uci -q set system.@system[0].mr7500_defaults_applied='1'
+uci -q commit system
 
 # 4. Configure ECM to use NSS hardware acceleration engine & enable bridge filtering
 if [ -f /etc/config/ecm ]; then

@@ -145,3 +145,33 @@ This document compiles all major engineering challenges, bugs, timing races, and
 * **Permanent Fix:**
   1. Preserved Slot 2 untouched as verified against factory backup pass1.
   2. Mandated the use of `sysupgrade -s -n /tmp/sysupgrade.bin` when booted from Slot 1 (`boot_part=1`), which restricts writes exclusively to Slot 1 partitions and guarantees rollback to OEM stock firmware via U-Boot `setenv boot_part 2; saveenv; reset`.
+
+---
+
+### Issue 11: AQR114C Slow Probe vs `phy_attach_direct()` Boot Race (`PHY_READY` Freeze & Null `dev_name` Oops)
+
+* **Severity:** **CRITICAL** (Complete 5G Ethernet Port Failure & Post-Probe Kernel Oops).
+* **Symptom:**
+  1. On cold boot, the Marvell/Aquantia 5G port (`wan` / `dp5-syn`) stayed permanently link-down (`carrier=0`, `Speed: Unknown!`, `tx_frame: 0`, `br-lan` port 5 `disabled`) and unreachable from an upstream 2.5G switch even though copper autonegotiation completed at `2500Mb/s Full` (`7/0xc800=0x0009`). Running `ip link set wan down` triggered a kernel `WARN` in `phy_stop` (`called from state READY`).
+  2. Once `phy_attach_direct()` was serialized behind `phy_probe()`, boot hit a second race: a `strlen(NULL)` Kernel Oops in `netdev_trig_activate()` triggered by the `led` hotplug event (`/etc/hotplug.d/leds/00-init`), causing Linksys `auto_recovery` to fall back to Slot 2.
+* **Root Cause:**
+  1. **Probe vs Attach Race:** Early `kmodloader` (`18-phy-aquantia`) starts `phy_probe()` -> `aqr107_probe()` -> `aqr_firmware_load()` (`v5.6.5 Cybertan Divo 090221 14:43:44`), which holds `device_lock(d)` and sets `d->driver`, then spends ~29 seconds loading 384 KB `AQR114C.cld` over MDIO. During that window, `S10boot` loads `qca-nss-dp` (`nss_dp_probe()`), calling `of_phy_connect()` -> `phy_attach_direct()`. Because `phy_attach_direct()` checked `d->driver` without acquiring `device_lock(d)`, it attached prematurely (`PHY_UP`), configured `4:0xc441`, and then had `aqr_fw_boot()` reset stall registers (wiping `4:0xc441` back to `0x0000`) and `phy_probe()` overwrite `phydev->state = PHY_READY`—freezing phylib's state machine forever.
+  2. **Unregistered Netdev LED Hotplug Race:** `nss_dp_probe()` calls `of_phy_connect()` before `register_netdev()`. When `phy_probe()` finishes and registers `of_phy_leds()`, the LED `add` uevent runs `netdev_trig_activate()` -> `phy_led_hw_control_get_device()` on an `attached_dev` whose `dev_name()` is still `NULL` (`reg_state != NETREG_REGISTERED`).
+* **Permanent Fix:**
+  1. Added `0984-net-phy-serialize-attach-with-probe.patch`: acquires `device_lock(d)` / `device_unlock(d)` in `phy_attach_direct()` around the driver check and bind so `nss-dp` cleanly waits until `aqr_firmware_load()` and `of_phy_leds()` complete.
+  2. Added `0985-net-phy-led-hw-control-check-registered-netdev.patch`: requires `phydev->attached_dev->reg_state == NETREG_REGISTERED` in `phy_led_hw_control_get_device()` and checks `if (name)` in `netdev_trig_activate()`.
+  3. Bundled both patches along with `0983-net-phy-aquantia-enable-usxgmii-autoneg.patch` and `package/kernel/qca-ssdk/patches/001-uniphy-usxgmii-autoneg.patch` in `patches/0003-qualcommax-mr7500-fix-usxgmii-probe-race-and-wan-leds.patch`, removed the redundant `/etc/rc.local` polling loop, and added `CONFIG_PACKAGE_phytool=y`.
+
+---
+
+### Issue 12: 5G WAN LED Offload Blocking & Switch+AP `uci-defaults` Sysupgrade Clobber
+
+* **Severity:** **Medium** (Dead/Un-offloaded 5G Link LED & Config Overwrite on Sysupgrade).
+* **Symptom:** The 5G port's green link LED never turned on/offloaded (`offloaded=0`, `0x1e/0xc431=0000`) and orange activity LED fell back to software triggering (`offloaded=0`, `0x1e/0xc430=0000`). Separately, Switch+AP mode settings (`192.168.1.91`, `dhcp.lan.ignore=1`, removed `10.143.1.1`) were overwritten to Router defaults after `sysupgrade`.
+* **Root Cause:**
+  1. `target/linux/qualcommax/ipq60xx/base-files/etc/board.d/01_leds` (`linksys,mr7500`) specified non-existent sysfs LED `90000.mdio-1:08:green:lan` instead of DTS `90000.mdio-1:08:green:wan`, and configured `link_10` in both `wan-port-link` and `wan-port-traffic`, which `aquantia_leds.c` does not list in `supported_triggers` (`-EOPNOTSUPP`).
+  2. `files/etc/uci-defaults/99-mr7500-nss-defaults` unconditionally reapplied `10.143.1.1` LAN/DHCP defaults on every first boot after `sysupgrade`.
+* **Permanent Fix:**
+  1. Updated `01_leds` (captured in `patches/0003-qualcommax-mr7500-fix-usxgmii-probe-race-and-wan-leds.patch`) to use `90000.mdio-1:08:green:wan` and omit unsupported `link_10`, enabling hardware LED offload (`offloaded=1`, `0x1e/0xc431=0xc060`, `0x1e/0xc430=0xc06c`).
+  2. Guarded `files/etc/uci-defaults/99-mr7500-nss-defaults` with `system.@system[0].mr7500_defaults_applied` and Switch+AP detection so preserved Switch+AP configurations survive `sysupgrade` intact.
+

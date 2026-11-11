@@ -1,4 +1,10 @@
 #!/bin/sh
-[ "$INTERFACE" = "wan" ] && [ "$ACTION" = "ifup" -o "$ACTION" = "ifupdate" ] && {
-    /usr/sbin/phytool write wan/8:4/0xc441 0x0008 2>/dev/null || true
-}
+if [ "$ACTION" = "ifup" -o "$ACTION" = "ifupdate" ]; then
+    if [ "$INTERFACE" = "wan" -o "$INTERFACE" = "lan" ]; then
+        PHYTOOL="$(command -v phytool 2>/dev/null)"
+        if [ -n "$PHYTOOL" ]; then
+            val=$("$PHYTOOL" read wan/8:4/0xc441 2>/dev/null)
+            [ "$val" = "0x0008" ] || "$PHYTOOL" write wan/8:4/0xc441 0x0008 2>/dev/null || true
+        fi
+    fi
+fi

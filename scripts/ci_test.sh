@@ -73,6 +73,33 @@ else
     log_fail "T3-Patch0002" "Patch 0002 missing or does not contain managed = 'in-band-status'"
 fi
 
+# 3b. Patch 0003: AQR114C Probe Race, Netdev LED Guard, SSDK & WAN LED Fixes
+echo "[*] Running Test 3b: Patch 0003 AQR114C Probe Race & LED Fixes..."
+PATCH_0003="$REPO_ROOT/patches/0003-qualcommax-mr7500-fix-usxgmii-probe-race-and-wan-leds.patch"
+if [ -f "$PATCH_0003" ]; then
+    REQUIRED_P3=(
+        "0983-net-phy-aquantia-enable-usxgmii-autoneg.patch"
+        "0984-net-phy-serialize-attach-with-probe.patch"
+        "0985-net-phy-led-hw-control-check-registered-netdev.patch"
+        "001-uniphy-usxgmii-autoneg.patch"
+        "90000.mdio-1:08:green:wan"
+        "NETREG_REGISTERED"
+        "device_lock(d)"
+    )
+    MISSING_P3=0
+    for s in "${REQUIRED_P3[@]}"; do
+        if ! grep -qF "$s" "$PATCH_0003"; then
+            log_fail "T3b-Patch0003" "Missing expected fix in Patch 0003: $s"
+            MISSING_P3=$((MISSING_P3 + 1))
+        fi
+    done
+    if [ "$MISSING_P3" -eq 0 ]; then
+        log_pass "T3b-Patch0003" "Patch 0003 contains probe serialization, LED netdev guard, USXGMII AN, and green:wan LED fixes"
+    fi
+else
+    log_fail "T3b-Patch0003" "Patch 0003 not found at $PATCH_0003"
+fi
+
 # 4. Security & Privacy Audit (Zero Plaintext Secrets or Private Keys)
 echo "[*] Running Test 4: Security & Credential Leak Audit..."
 LEAKS=0
@@ -119,6 +146,7 @@ if [ -f "$DIFFCONFIG" ]; then
         "CONFIG_PACKAGE_sqm-scripts-nss=y"
         "CONFIG_PACKAGE_kmod-fs-vfat=y"
         "CONFIG_PACKAGE_kmod-fs-exfat=y"
+        "CONFIG_PACKAGE_phytool=y"
     )
     MISSING_DIFF=0
     for sym in "${REQUIRED_DIFF_SYMBOLS[@]}"; do

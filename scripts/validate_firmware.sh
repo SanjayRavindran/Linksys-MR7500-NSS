@@ -1,6 +1,7 @@
 #!/bin/sh
 # Linksys MR7500 On-Device Regression & Health Validation Script
-# Can be run directly on the router or via SSH: ssh root@10.143.1.1 'sh -s' < scripts/validate_firmware.sh
+# Supports both Router Mode and Switch + AP Mode.
+# Can be run directly on the router or via SSH: ssh root@<ROUTER_IP> 'sh -s' < scripts/validate_firmware.sh
 
 PASS=0
 FAIL=0
@@ -13,6 +14,15 @@ log_warn() { echo "[WARN] $1: $2"; WARN=$((WARN+1)); }
 echo "================================================================================"
 echo "LINKSYS MR7500 ON-DEVICE HARDWARE & FIRMWARE VALIDATION SUITE"
 echo "================================================================================"
+
+BRIF=$(ls /sys/class/net/br-lan/brif 2>/dev/null)
+IS_AP_MODE=0
+if echo "$BRIF" | grep -qw "wan"; then
+    IS_AP_MODE=1
+    echo "Detected Operating Mode: Switch + AP Mode"
+else
+    echo "Detected Operating Mode: Router Mode"
+fi
 
 # 1. Boot Slot
 CMDLINE=$(cat /proc/cmdline)
@@ -43,50 +53,95 @@ else
     log_fail "TC-03" "NSS offload modules missing or acceleration engine is not 'nss'"
 fi
 
-# 4. Multi-Gigabit WAN (AQR114C)
+# 4. Multi-Gigabit 5G Port (AQR114C) + USXGMII AN + Hardware LED Offload
 ETH_WAN=$(ethtool wan 2>/dev/null)
-if echo "$ETH_WAN" | grep -q "Link detected: yes"; then
+WAN_CARRIER=$(cat /sys/class/net/wan/carrier 2>/dev/null || echo "0")
+LED_GREEN_OFF=$(cat /sys/class/leds/90000.mdio-1:08:green:wan/offloaded 2>/dev/null || echo "0")
+LED_ORANGE_OFF=$(cat /sys/class/leds/90000.mdio-1:08:orange:wan/offloaded 2>/dev/null || echo "0")
+PHYXS_AN="skipped"
+PHYXS_OK=1
+if command -v phytool >/dev/null 2>&1; then
+    PHYXS_AN=$(phytool read wan/8:4/0xc441 2>/dev/null | tr -d '[:space:]')
+    echo "$PHYXS_AN" | grep -qi "^0x0008$" || PHYXS_OK=0
+fi
+if echo "$ETH_WAN" | grep -q "Link detected: yes" && [ "$WAN_CARRIER" = "1" ] && \
+   [ "$PHYXS_OK" -eq 1 ] && [ "$LED_GREEN_OFF" = "1" ] && [ "$LED_ORANGE_OFF" = "1" ]; then
     SPEED=$(echo "$ETH_WAN" | grep "Speed:" | awk '{print $2}')
     RX_FRAMES=$(ethtool -S wan 2>/dev/null | grep "rx_frame:" | awk '{print $2}')
-    log_pass "TC-04" "AQR114C WAN Link UP @ $SPEED Full Duplex (rx_frame: $RX_FRAMES)"
+    log_pass "TC-04" "AQR114C 5G Link UP @ $SPEED Full (carrier=$WAN_CARRIER, 4:c441=$PHYXS_AN, LEDs offloaded=1/1, rx_frame: $RX_FRAMES)"
 else
-    log_fail "TC-04" "WAN link is DOWN"
+    log_fail "TC-04" "5G WAN failed (link=$(echo "$ETH_WAN" | grep "Link detected:" | awk '{print $3}'), carrier=$WAN_CARRIER, 4:c441=$PHYXS_AN, offloaded=${LED_GREEN_OFF}/${LED_ORANGE_OFF})"
 fi
 
-# 5. LAN Switch Fabric (QCA8075)
-BRIF=$(ls /sys/class/net/br-lan/brif 2>/dev/null)
+# 5. Switch Fabric & Bridge Ports (QCA8075 + AQR114C)
 LAN_PORTS=$(echo "$BRIF" | grep "^lan" | wc -l)
-if [ "$LAN_PORTS" -ge 4 ]; then
-    log_pass "TC-05" "QCA8075 4-port switch fabric bridged to br-lan (ports: $LAN_PORTS)"
+if [ "$IS_AP_MODE" -eq 1 ]; then
+    if [ "$LAN_PORTS" -ge 4 ] && echo "$BRIF" | grep -qw "wan"; then
+        log_pass "TC-05" "Unified 5-port switch fabric bridged to br-lan (lan1..4 + wan)"
+    else
+        log_fail "TC-05" "Expected lan1..4 + wan in br-lan, found: $(echo $BRIF)"
+    fi
 else
-    log_fail "TC-05" "Expected 4 LAN ports in br-lan, found: $LAN_PORTS"
+    if [ "$LAN_PORTS" -ge 4 ]; then
+        log_pass "TC-05" "QCA8075 4-port switch fabric bridged to br-lan (ports: $LAN_PORTS)"
+    else
+        log_fail "TC-05" "Expected 4 LAN ports in br-lan, found: $LAN_PORTS"
+    fi
 fi
 
-# 6. WAN DHCP & IPv4 Internet
-WAN_STATUS=$(ubus call network.interface.wan status 2>/dev/null)
-if echo "$WAN_STATUS" | grep -q '"up": true' && ping -c 2 -W 2 1.1.1.1 >/dev/null 2>&1; then
-    WAN_ADDR=$(echo "$WAN_STATUS" | grep -A 2 'ipv4-address' | grep '"address"' | cut -d'"' -f4)
-    log_pass "TC-06" "WAN IP: $WAN_ADDR. Outbound ping 1.1.1.1: 0% loss"
+# 6. Upstream Gateway & IPv4 Internet
+if [ "$IS_AP_MODE" -eq 1 ]; then
+    BR_IP=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2; exit}')
+    GW_IP=$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')
+    if [ -n "$BR_IP" ] && [ -n "$GW_IP" ] && ping -c 2 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        log_pass "TC-06" "Switch+AP br-lan $BR_IP via gw $GW_IP. Outbound ping 1.1.1.1: 0% loss"
+    else
+        log_fail "TC-06" "Switch+AP connectivity failed (br-lan=$BR_IP, gw=$GW_IP)"
+    fi
 else
-    log_fail "TC-06" "WAN interface down or no IPv4 internet connectivity"
+    WAN_STATUS=$(ubus call network.interface.wan status 2>/dev/null)
+    if echo "$WAN_STATUS" | grep -q '"up": true' && ping -c 2 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        WAN_ADDR=$(echo "$WAN_STATUS" | grep -A 2 'ipv4-address' | grep '"address"' | cut -d'"' -f4)
+        log_pass "TC-06" "WAN IP: $WAN_ADDR. Outbound ping 1.1.1.1: 0% loss"
+    else
+        log_fail "TC-06" "WAN interface down or no IPv4 internet connectivity"
+    fi
 fi
 
-# 7. LAN DHCP Server & DNS
-LAN_ADDR=$(ip -4 addr show br-lan 2>/dev/null | grep "inet 10.143.1.1/24")
-DNS_PID=$(pidof dnsmasq)
-if [ -n "$LAN_ADDR" ] && [ -n "$DNS_PID" ] && nslookup google.com 10.143.1.1 >/dev/null 2>&1; then
-    log_pass "TC-07" "LAN 10.143.1.1/24 hygiene verified, dnsmasq active, DNS query OK"
+# 7. LAN DHCP Server Hygiene & DNS
+if [ "$IS_AP_MODE" -eq 1 ]; then
+    DHCP_IGNORE=$(uci get dhcp.lan.ignore 2>/dev/null || echo "0")
+    PORT67=$(netstat -uln 2>/dev/null | grep ":67 " || true)
+    if [ "$DHCP_IGNORE" = "1" ] && [ -z "$PORT67" ] && nslookup google.com 1.1.1.1 >/dev/null 2>&1; then
+        log_pass "TC-07" "Switch+AP DHCP server cleanly disabled (ignore=1, UDP/67 closed), DNS lookup OK"
+    else
+        log_fail "TC-07" "Switch+AP DHCP/DNS check failed (ignore=$DHCP_IGNORE, port67=$([ -n "$PORT67" ] && echo open || echo closed))"
+    fi
 else
-    log_fail "TC-07" "LAN subnet mismatch or dnsmasq not resolving"
+    LAN_ADDR=$(ip -4 addr show br-lan 2>/dev/null | grep "inet 10.143.1.1/24")
+    DNS_PID=$(pidof dnsmasq)
+    if [ -n "$LAN_ADDR" ] && [ -n "$DNS_PID" ] && nslookup google.com 10.143.1.1 >/dev/null 2>&1; then
+        log_pass "TC-07" "LAN 10.143.1.1/24 hygiene verified, dnsmasq active, DNS query OK"
+    else
+        log_fail "TC-07" "LAN subnet mismatch or dnsmasq not resolving"
+    fi
 fi
 
 # 8. IPv6 SLAAC & Routing
-ODHCPD_PID=$(pidof odhcpd)
-SLAAC=$(uci get dhcp.lan.ra_slaac 2>/dev/null)
-if [ -n "$ODHCPD_PID" ] && [ "$SLAAC" = "1" ] && ping -6 -c 2 -W 2 2606:4700:4700::1111 >/dev/null 2>&1; then
-    log_pass "TC-08" "RFC 4862 SLAAC active, odhcpd PID $ODHCPD_PID, IPv6 Cloudflare ping OK"
+if [ "$IS_AP_MODE" -eq 1 ]; then
+    if ping -6 -c 2 -W 2 2606:4700:4700::1111 >/dev/null 2>&1; then
+        log_pass "TC-08" "Switch+AP upstream IPv6 Cloudflare ping OK"
+    else
+        log_warn "TC-08" "Switch+AP IPv6 Cloudflare unreachable (upstream RA/IPv6 dependent)"
+    fi
 else
-    log_warn "TC-08" "IPv6 SLAAC or IPv6 ping warning (slaac: $SLAAC)"
+    ODHCPD_PID=$(pidof odhcpd)
+    SLAAC=$(uci get dhcp.lan.ra_slaac 2>/dev/null)
+    if [ -n "$ODHCPD_PID" ] && [ "$SLAAC" = "1" ] && ping -6 -c 2 -W 2 2606:4700:4700::1111 >/dev/null 2>&1; then
+        log_pass "TC-08" "RFC 4862 SLAAC active, odhcpd PID $ODHCPD_PID, IPv6 Cloudflare ping OK"
+    else
+        log_warn "TC-08" "IPv6 SLAAC or IPv6 ping warning (slaac: $SLAAC)"
+    fi
 fi
 
 # 9. Tri-Band Wi-Fi 6E

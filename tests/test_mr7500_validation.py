@@ -109,20 +109,32 @@ class MR7500Validator:
     def test_04_aquantia_wan_and_phyxs_autoneg(self):
         rc, ethtool_out, _ = self.ssh_exec("ethtool wan")
         rc, ethtool_stats, _ = self.ssh_exec("ethtool -S wan")
+        rc, carrier_out, _ = self.ssh_exec("cat /sys/class/net/wan/carrier")
+        rc_phy, phy_reg, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:4/0xc441 || echo skipped")
+        rc, led_off_out, _ = self.ssh_exec(
+            "cat /sys/class/leds/90000.mdio-1:08:green:wan/offloaded "
+            "/sys/class/leds/90000.mdio-1:08:orange:wan/offloaded"
+        )
 
         is_link_up = "Link detected: yes" in ethtool_out
+        carrier_up = carrier_out.strip() == "1"
         speed_match = re.search(r"Speed:\s*([0-9]+)Mb/s", ethtool_out)
         speed = speed_match.group(1) if speed_match else "0"
-        
+
         rx_match = re.search(r"rx_frame:\s*([0-9]+)", ethtool_stats)
         rx_frames = rx_match.group(1) if rx_match else "0"
 
-        if is_link_up and int(speed) >= 1000:
-            self.record("TC-04", "Marvell/Aquantia 5GbE Port & USXGMII SerDes", "PASS",
-                        f"Link UP @ {speed} Mb/s Full Duplex. rx_frame: {rx_frames}. Clause 37 SerDes active.")
+        phy_val = phy_reg.strip().lower()
+        phyxs_ok = (phy_val == "skipped") or (phy_val == "0x0008")
+        led_off_vals = led_off_out.split()
+        leds_offloaded = len(led_off_vals) == 2 and all(v == "1" for v in led_off_vals)
+
+        if is_link_up and carrier_up and int(speed) >= 1000 and phyxs_ok and leds_offloaded:
+            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN & HW LED Offload", "PASS",
+                        f"Link UP @ {speed} Mb/s Full (carrier=1, 4:0xc441={phy_val}, LEDs offloaded=1/1, rx_frame: {rx_frames}).")
         else:
-            self.record("TC-04", "Marvell/Aquantia 5GbE Port & USXGMII SerDes", "FAIL",
-                        f"Link detected: {is_link_up}, Speed: {speed}")
+            self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN & HW LED Offload", "FAIL",
+                        f"Link={is_link_up}, carrier={carrier_out.strip()}, Speed={speed}, 4:0xc441={phy_val}, LED offloaded={led_off_vals}")
 
     def test_05_switch_fabric_and_bridge_ports(self):
         rc, brif_out, _ = self.ssh_exec("ls /sys/class/net/br-lan/brif")

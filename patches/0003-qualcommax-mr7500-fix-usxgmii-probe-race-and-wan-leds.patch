@@ -1,0 +1,180 @@
+From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
+Subject: [PATCH] qualcommax: mr7500: fix AQR114C USXGMII probe race, LED hw control, and SSDK AN
+
+- Serialize phy_attach_direct() with phy_probe() via device_lock(d) (0984) so
+  qca-nss-dp does not attach wan before AQR114C firmware upload finishes.
+- Guard phy_led_hw_control_get_device() and netdev_trig_activate() against
+  unregistered netdevs whose dev_name() is NULL before register_netdev() (0985).
+- Enable PHYXS USXGMII Clause 37 in-band auto-neg in aquantia_main (0983) and
+  increase SSDK UNIPHY USXGMII autoneg poll retries (001).
+- Fix linksys,mr7500 5GbE WAN LED sysfs path (green:wan) and omit unsupported
+  link_10 so AQR114C hardware LED offload activates.
+
+diff --git a/target/linux/qualcommax/ipq60xx/base-files/etc/board.d/01_leds b/target/linux/qualcommax/ipq60xx/base-files/etc/board.d/01_leds
+index 2f39503..90814ef 100644
+--- a/target/linux/qualcommax/ipq60xx/base-files/etc/board.d/01_leds
++++ b/target/linux/qualcommax/ipq60xx/base-files/etc/board.d/01_leds
+@@ -28,8 +28,8 @@ linksys,mr7500)
+ 	ucidef_set_led_netdev "lan3-port-traffic" "LAN3-PORT-TRAFFIC" "90000.mdio-1:02:orange:lan" "lan3" "tx rx link_10 link_100 link_1000"
+ 	ucidef_set_led_netdev "lan4-port-link" "LAN4-PORT-LINK" "90000.mdio-1:03:green:lan" "lan4" "link_10 link_100 link_1000"
+ 	ucidef_set_led_netdev "lan4-port-traffic" "LAN4-PORT-TRAFFIC" "90000.mdio-1:03:orange:lan" "lan4" "tx rx link_10 link_100 link_1000"
+-	ucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:08:green:lan" "wan" "link_10 link_100 link_1000 link_2500 link_5000"
+-	ucidef_set_led_netdev "wan-port-traffic" "WAN-PORT-TRAFFIC" "90000.mdio-1:08:orange:wan" "wan" "tx rx link_10 link_100 link_1000 link_2500 link_5000"
++	ucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:08:green:wan" "wan" "link_100 link_1000 link_2500 link_5000"
++	ucidef_set_led_netdev "wan-port-traffic" "WAN-PORT-TRAFFIC" "90000.mdio-1:08:orange:wan" "wan" "tx rx link_100 link_1000 link_2500 link_5000"
+ 	;;
+ yuncore,fap650)
+ 	ucidef_set_led_netdev "wlan5ghz" "WLAN 5GHz LED" "blue:wlan-5ghz" "wlan0" "tx rx"
+diff --git a/package/kernel/qca-ssdk/patches/001-uniphy-usxgmii-autoneg.patch b/package/kernel/qca-ssdk/patches/001-uniphy-usxgmii-autoneg.patch
+new file mode 100644
+index 0000000..2e7ef2e
+--- /dev/null
++++ b/package/kernel/qca-ssdk/patches/001-uniphy-usxgmii-autoneg.patch
+@@ -0,0 +1,11 @@
++--- a/src/adpt/hppe/adpt_hppe_portctrl.c
+++++ b/src/adpt/hppe/adpt_hppe_portctrl.c
++@@ -3990,7 +3990,7 @@
++ adpt_hppe_uniphy_usxgmii_autoneg_completed(a_uint32_t dev_id,
++ 				a_uint32_t uniphy_index, a_uint32_t port_id)
++ {
++-	a_uint32_t autoneg_complete = 0, retries = 100;
+++	a_uint32_t autoneg_complete = 0, retries = 500;
++ 	union vr_mii_an_intr_sts_u vr_mii_an_intr_sts;
++ 
++ 	memset(&vr_mii_an_intr_sts, 0, sizeof(vr_mii_an_intr_sts));
+diff --git a/target/linux/qualcommax/patches-6.12/0983-net-phy-aquantia-enable-usxgmii-autoneg.patch b/target/linux/qualcommax/patches-6.12/0983-net-phy-aquantia-enable-usxgmii-autoneg.patch
+new file mode 100644
+index 0000000..08df3d8
+--- /dev/null
++++ b/target/linux/qualcommax/patches-6.12/0983-net-phy-aquantia-enable-usxgmii-autoneg.patch
+@@ -0,0 +1,13 @@
++--- a/drivers/net/phy/aquantia/aquantia_main.c
+++++ b/drivers/net/phy/aquantia/aquantia_main.c
++@@ -623,6 +623,10 @@
++ 	if (ret)
++ 		return ret;
++ 
+++	/* Enable USXGMII Clause 37 auto-negotiation on PHYXS if in USXGMII mode */
+++	if (phydev->interface == PHY_INTERFACE_MODE_USXGMII)
+++		phy_set_bits_mmd(phydev, MDIO_MMD_PHYXS, 0xc441, 0x0008);
+++
++ 	/* Restore LED polarity state after reset */
++ 	for_each_set_bit(led_idx, &priv->leds_active_low, AQR_MAX_LEDS) {
++ 		ret = aqr_phy_led_active_low_set(phydev, led_idx, true);
+diff --git a/target/linux/qualcommax/patches-6.12/0984-net-phy-serialize-attach-with-probe.patch b/target/linux/qualcommax/patches-6.12/0984-net-phy-serialize-attach-with-probe.patch
+new file mode 100644
+index 0000000..f6e8ba5
+--- /dev/null
++++ b/target/linux/qualcommax/patches-6.12/0984-net-phy-serialize-attach-with-probe.patch
+@@ -0,0 +1,57 @@
++From: MR7500 OpenWrt NSS Port <mr7500@localhost>
++Subject: [PATCH] net: phy: serialize phy_attach_direct() with phy_probe()
++
++Driver core sets dev->driver before invoking phy_probe() while holding
++device_lock(dev). On slow C45 PHYs whose probe uploads firmware over MDIO
++(e.g., Marvell/Aquantia AQR114C ~29s), a MAC driver probing concurrently
++can call of_phy_connect() -> phy_attach_direct() mid-probe, observe
++d->driver != NULL, run phy_init_hw() early, and let netifd call phy_start()
++before phy_probe() completes. When phy_probe() later finishes firmware boot
++(clearing PHYXS USXGMII 4:0xc441) and sets phydev->state = PHY_READY, the
++live state machine freezes in PHY_READY with no carrier and late LEDs.
++
++Acquire device_lock(d) around driver inspection and genphy bind in
++phy_attach_direct() so attachment waits cleanly for phy_probe().
++
++--- a/drivers/net/phy/phy_device.c
+++++ b/drivers/net/phy/phy_device.c
++@@ -1578,6 +1578,15 @@
++ 
++ 	get_device(d);
++ 
+++	/*
+++	 * Serialize with driver core probing (really_probe() sets d->driver
+++	 * before calling phy_probe()). If a specific PHY driver like Aquantia
+++	 * is currently mid-probe (e.g., uploading firmware over MDIO), wait
+++	 * for phy_probe() and device_bind_driver() to finish so phydev->state
+++	 * and PHY LEDs are initialized before attaching.
+++	 */
+++	device_lock(d);
+++
++ 	/* Assume that if there is no driver, that it doesn't
++ 	 * exist, and we should use the genphy driver.
++ 	 */
++@@ -1592,6 +1601,7 @@
++ 
++ 	if (!try_module_get(d->driver->owner)) {
++ 		phydev_err(phydev, "failed to get the device driver module\n");
+++		device_unlock(d);
++ 		err = -EIO;
++ 		goto error_put_device;
++ 	}
++@@ -1601,10 +1611,14 @@
++ 		if (err >= 0)
++ 			err = device_bind_driver(d);
++ 
++-		if (err)
+++		if (err) {
+++			device_unlock(d);
++ 			goto error_module_put;
+++		}
++ 	}
++ 
+++	device_unlock(d);
+++
++ 	if (phydev->attached_dev) {
++ 		dev_err(&dev->dev, "PHY already attached\n");
++ 		err = -EBUSY;
+diff --git a/target/linux/qualcommax/patches-6.12/0985-net-phy-led-hw-control-check-registered-netdev.patch b/target/linux/qualcommax/patches-6.12/0985-net-phy-led-hw-control-check-registered-netdev.patch
+new file mode 100644
+index 0000000..91a01f6
+--- /dev/null
++++ b/target/linux/qualcommax/patches-6.12/0985-net-phy-led-hw-control-check-registered-netdev.patch
+@@ -0,0 +1,48 @@
++From: MR7500 OpenWrt NSS Port <mr7500@localhost>
++Subject: [PATCH] net: phy: guard hw_control_get_device for unregistered netdevs
++
++Drivers such as qca-nss-dp call of_phy_connect() -> phy_attach_direct()
++before register_netdev(). When phy_probe() finishes registering PHY LEDs
++(of_phy_leds()), userspace hotplug can activate the netdev trigger on the
++PHY LED before register_netdev() assigns dev->dev.kobj.name. In that
++window dev_name(&phydev->attached_dev->dev) is NULL and netdev_trig_activate()
++panics inside strlen(name).
++
++Require attached_dev->reg_state == NETREG_REGISTERED in
++phy_led_hw_control_get_device() and check dev_name() != NULL in
++netdev_trig_activate().
++
++--- a/drivers/net/phy/phy_device.c
+++++ b/drivers/net/phy/phy_device.c
++@@ -3338,7 +3338,8 @@
++ 	struct phy_led *phyled = to_phy_led(led_cdev);
++ 	struct phy_device *phydev = phyled->phydev;
++ 
++-	if (phydev->attached_dev)
+++	if (phydev->attached_dev &&
+++	    phydev->attached_dev->reg_state == NETREG_REGISTERED)
++ 		return &phydev->attached_dev->dev;
++ 	return NULL;
++ }
++--- a/drivers/leds/trigger/ledtrig-netdev.c
+++++ b/drivers/leds/trigger/ledtrig-netdev.c
++@@ -716,12 +716,14 @@
++ 		if (dev) {
++ 			const char *name = dev_name(dev);
++ 
++-			trigger_data->hw_control = true;
++-			set_device_name(trigger_data, name, strlen(name));
+++			if (name) {
+++				trigger_data->hw_control = true;
+++				set_device_name(trigger_data, name, strlen(name));
++ 
++-			rc = led_cdev->hw_control_get(led_cdev, &mode);
++-			if (!rc)
++-				trigger_data->mode = mode;
+++				rc = led_cdev->hw_control_get(led_cdev, &mode);
+++				if (!rc)
+++					trigger_data->mode = mode;
+++			}
++ 		}
++ 	}
++ 
