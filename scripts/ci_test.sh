@@ -129,6 +129,31 @@ else
     log_fail "T3c-Patch0004" "Patch 0004 not found at $PATCH_0004"
 fi
 
+# 3d2. Patch 0005 AQR114C USXGMII Boot/Hotplug Self-Heal
+echo "[*] Running Test 3e: Patch 0005 AQR114C USXGMII Boot & Hotplug Fix..."
+PATCH_0005="$REPO_ROOT/patches/0005-qualcommax-mr7500-harden-aqr114c-usxgmii-hotplug.patch"
+if [ -f "$PATCH_0005" ]; then
+    REQUIRED_P5=(
+        "VEND1_GLOBAL_CFG_100M"
+        "aqr_wait_fw_provisioning"
+        "aqr_enable_usxgmii_autoneg"
+        "aqr107_wait_processor_intensive_op"
+        "aqr_config_aneg"
+        "aqr107_read_status"
+        "aqr107_resume"
+    )
+    MISSING_P5=0
+    for s in "${REQUIRED_P5[@]}"; do
+        if ! grep -qF -- "$s" "$PATCH_0005"; then
+            log_fail "T3e-Patch0005" "Missing expected fix in Patch 0005: $s"
+            MISSING_P5=$((MISSING_P5 + 1))
+        fi
+    done
+    [ "$MISSING_P5" -eq 0 ] && log_pass "T3e-Patch0005" "Patch 0005 hardens AQR114C USXGMII C37 AN across boot, resume, aneg, and hotplug"
+else
+    log_fail "T3e-Patch0005" "Patch 0005 not found at $PATCH_0005"
+fi
+
 # 3d. AQR114C DTS NVMEM Downgrade Guard
 echo "[*] Running Test 3d: AQR114C DTS NVMEM Guard..."
 if grep -rnE "^\+.*aqr_fw" "$REPO_ROOT"/patches/*.patch 2>/dev/null; then

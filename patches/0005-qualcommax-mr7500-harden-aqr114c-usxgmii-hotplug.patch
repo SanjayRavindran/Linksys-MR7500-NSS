@@ -1,0 +1,158 @@
+From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
+Subject: [PATCH] qualcommax: mr7500: harden AQR114C USXGMII C37 auto-neg for boot and hot-plug
+
+- Wait for aqr107_wait_processor_intensive_op() and VEND1_GLOBAL_CFG_100M
+  (30:0x031b != 0) before setting PHYXS 4:0xc441 |= 0x0008 in
+  aqr107_config_init(), preventing AQR114C v5.6.5 firmware from overwriting
+  4:0xc441 back to 0x0000 ~40 ms after VEND1_GLOBAL_FW_ID becomes non-zero.
+- Enforce PHYXS 4:0xc441 bit 3 in aqr107_resume(), aqr_config_aneg(), and
+  aqr107_read_status() when phydev->interface == PHY_INTERFACE_MODE_USXGMII,
+  so link hot-plug, admin down/up, and Router/DHCP WAN bringup self-heal
+  without relying on the racy userspace 10-wan-aqr iface hook.
+
+--- a/target/linux/qualcommax/patches-6.12/0983-net-phy-aquantia-enable-usxgmii-autoneg.patch
++++ b/target/linux/qualcommax/patches-6.12/0983-net-phy-aquantia-enable-usxgmii-autoneg.patch
+@@ -1,13 +1,137 @@
++From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
++Subject: [PATCH] net: phy: aquantia: robustly enable USXGMII C37 AN on AQR114C
++
++AQR114C firmware reports VEND1_GLOBAL_FW_ID (30:0x0020) before internal
++provisioning finishes initializing GLOBAL_CFG_100M (30:0x031b) and PHYXS
++registers, overwriting PHYXS 4:0xc441 back to 0x0000 ~40 ms after
++aqr_wait_reset_complete() returns. Additionally, waking from suspend or
++re-negotiating after physical hot-plug requires PHYXS 4:0xc441 bit 3
++(0x0008) to remain set.
++
++Wait for processor-intensive op and VEND1_GLOBAL_CFG_100M != 0 in
++aqr107_config_init() and aqr107_resume(), and enforce PHYXS 4:0xc441 bit 3
++across config_init, resume, config_aneg, and read_status when in USXGMII mode.
++
+ --- a/drivers/net/phy/aquantia/aquantia_main.c
+ +++ b/drivers/net/phy/aquantia/aquantia_main.c
+-@@ -623,6 +623,10 @@
++@@ -179,6 +179,50 @@
++ 	}
++ }
++ 
+++static int aqr107_wait_processor_intensive_op(struct phy_device *phydev);
+++
+++/* AQR114C firmware reports VEND1_GLOBAL_FW_ID before internal provisioning
+++ * tables finish initializing GLOBAL_CFG_100M and PHYXS registers, briefly
+++ * overwriting PHYXS 4:0xc441 back to 0x0000 ~40 ms after FW_ID becomes
+++ * non-zero. Wait for OP_IN_PROG and GLOBAL_CFG_100M before setting 4:0xc441.
+++ */
+++static int aqr_wait_fw_provisioning(struct phy_device *phydev)
+++{
+++	int ret, val;
+++
+++	ret = aqr107_wait_processor_intensive_op(phydev);
+++	if (ret && ret != -ETIMEDOUT)
+++		return ret;
+++
+++	if (phydev->interface != PHY_INTERFACE_MODE_USXGMII)
+++		return 0;
+++
+++	ret = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
+++					VEND1_GLOBAL_CFG_100M, val, val != 0,
+++					1000, 200000, false);
+++	if (ret && ret != -ETIMEDOUT)
+++		return ret;
+++
+++	usleep_range(10000, 15000);
+++	return 0;
+++}
+++
+++static int aqr_enable_usxgmii_autoneg(struct phy_device *phydev)
+++{
+++	int val;
+++
+++	if (phydev->interface != PHY_INTERFACE_MODE_USXGMII)
+++		return 0;
+++
+++	val = phy_read_mmd(phydev, MDIO_MMD_PHYXS, 0xc441);
+++	if (val < 0)
+++		return val;
+++	if (val & 0x0008)
+++		return 0;
+++
+++	return phy_set_bits_mmd(phydev, MDIO_MMD_PHYXS, 0xc441, 0x0008);
+++}
+++
++ static int aqr_config_aneg(struct phy_device *phydev)
++ {
++ 	bool changed = false;
++@@ -225,6 +269,10 @@
++ 	if (ret > 0)
++ 		changed = true;
++ 
+++	ret = aqr_enable_usxgmii_autoneg(phydev);
+++	if (ret)
+++		return ret;
+++
++ 	return genphy_c45_check_and_restart_aneg(phydev, changed);
++ }
++ 
++@@ -421,8 +469,10 @@
+  	if (ret)
+  		return ret;
+  
++-	if (!phydev->link || phydev->autoneg == AUTONEG_DISABLE)
+++	if (!phydev->link || phydev->autoneg == AUTONEG_DISABLE) {
+++		aqr_enable_usxgmii_autoneg(phydev);
++ 		return 0;
+++	}
++ 
++ 	val = phy_read_mmd(phydev, MDIO_MMD_PHYXS, MDIO_PHYXS_VEND_IF_STATUS);
++ 	if (val < 0)
++@@ -458,6 +508,10 @@
++ 		break;
++ 	}
++ 
+++	ret = aqr_enable_usxgmii_autoneg(phydev);
+++	if (ret)
+++		return ret;
+++
++ 	/* Read possibly downshifted rate from vendor register */
++ 	return aqr107_read_rate(phydev);
++ }
++@@ -615,6 +669,10 @@
++ 	if (!ret)
++ 		aqr107_chip_info(phydev);
++ 
+++	ret = aqr_wait_fw_provisioning(phydev);
+++	if (ret)
+++		return ret;
+++
++ 	ret = aqr107_set_downshift(phydev, MDIO_AN_VEND_PROV_DOWNSHIFT_DFLT);
++ 	if (ret)
++ 		return ret;
++@@ -636,6 +694,11 @@
++ 			return ret;
++ 	}
++ 
+ +	/* Enable USXGMII Clause 37 auto-negotiation on PHYXS if in USXGMII mode */
+-+	if (phydev->interface == PHY_INTERFACE_MODE_USXGMII)
+-+		phy_set_bits_mmd(phydev, MDIO_MMD_PHYXS, 0xc441, 0x0008);
+++	ret = aqr_enable_usxgmii_autoneg(phydev);
+++	if (ret)
+++		return ret;
+++
++ 	return 0;
++ }
++ 
++@@ -755,7 +818,11 @@
++ 	if (err)
++ 		return err;
++ 
++-	return aqr107_wait_processor_intensive_op(phydev);
+++	err = aqr_wait_fw_provisioning(phydev);
+++	if (err)
+++		return err;
+ +
+- 	/* Restore LED polarity state after reset */
+- 	for_each_set_bit(led_idx, &priv->leds_active_low, AQR_MAX_LEDS) {
+- 		ret = aqr_phy_led_active_low_set(phydev, led_idx, true);
+++	return aqr_enable_usxgmii_autoneg(phydev);
++ }
++ 
++ static const u16 aqr_global_cfg_regs[] = {
