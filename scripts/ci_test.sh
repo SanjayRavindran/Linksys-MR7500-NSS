@@ -154,6 +154,29 @@ else
     log_fail "T3e-Patch0005" "Patch 0005 not found at $PATCH_0005"
 fi
 
+# 3f. Patch 0006 ath11k AHB CE IRQ Serialization
+echo "[*] Running Test 3f: Patch 0006 ath11k AHB CE IRQ Spinlock..."
+PATCH_0006="$REPO_ROOT/patches/0006-qualcommax-mr7500-serialize-ath11k-ahb-ce-irq.patch"
+if [ -f "$PATCH_0006" ]; then
+    REQUIRED_P6=(
+        "990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch"
+        "ce_irq_lock"
+        "spin_lock_irqsave"
+        "ath11k_ahb_ce_irq_set"
+        "ath11k_ahb_modbit32"
+    )
+    MISSING_P6=0
+    for s in "${REQUIRED_P6[@]}"; do
+        if ! grep -qF -- "$s" "$PATCH_0006"; then
+            log_fail "T3f-Patch0006" "Missing expected fix in Patch 0006: $s"
+            MISSING_P6=$((MISSING_P6 + 1))
+        fi
+    done
+    [ "$MISSING_P6" -eq 0 ] && log_pass "T3f-Patch0006" "Patch 0006 serializes ath11k AHB CE IE register RMWs with irqsave spinlock"
+else
+    log_fail "T3f-Patch0006" "Patch 0006 not found at $PATCH_0006"
+fi
+
 # 3d. AQR114C DTS NVMEM Downgrade Guard
 echo "[*] Running Test 3d: AQR114C DTS NVMEM Guard..."
 if grep -rnE "^\+.*aqr_fw" "$REPO_ROOT"/patches/*.patch 2>/dev/null; then

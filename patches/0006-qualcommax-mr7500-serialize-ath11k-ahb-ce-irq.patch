@@ -1,0 +1,134 @@
+From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
+Subject: [PATCH] qualcommax: mr7500: serialize ath11k AHB CE IRQ enable/disable RMWs
+
+Add mac80211/ath11k patch 990 to protect shared CE_HOST_IE_1/2/3 bit updates
+with a per-device irqsave spinlock in struct ath11k_ahb, preventing cross-CPU
+interrupt mask corruption on IPQ6018 c000000.wifi (which previously masked
+edge-triggered ce3 WMI TX completions and caused -ENOBUFS/-105 WMI hangs).
+
+diff --git a/package/kernel/mac80211/patches/ath11k/990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch b/package/kernel/mac80211/patches/ath11k/990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch
+new file mode 100644
+index 0000000..8c07212
+--- /dev/null
++++ b/package/kernel/mac80211/patches/ath11k/990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch
+@@ -0,0 +1,120 @@
++From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
++Subject: [PATCH] wifi: ath11k: serialize AHB CE interrupt enable/disable RMWs
++
++ath11k_ahb_ce_interrupt_handler() (hard IRQ) and ath11k_ahb_ce_tasklet()
++(softirq) share the 32-bit CE_HOST_IE_1/2/3 registers across all AHB Copy
++Engines via unlocked read-modify-write helpers. When CE IRQs (such as
++ce2 and ce3 on IPQ6018 c000000.wifi) run concurrently on different CPUs,
++unlocked RMWs can overwrite another pipe's enable bit back to zero,
++permanently masking edge-triggered WMI TX completion interrupts (ce3) and
++causing endless -ENOBUFS (-105) WMI timeouts.
++
++Serialize CE_HOST_IE RMWs with a per-device irqsave spinlock in struct
++ath11k_ahb.
++
++--- a/drivers/net/wireless/ath/ath11k/ahb.h	2026-11-15 14:57:37.134293097 +0000
+++++ b/drivers/net/wireless/ath/ath11k/ahb.h	2026-11-15 14:57:37.134344857 +0000
++@@ -22,6 +22,8 @@
++ struct ath11k_base;
++ 
++ struct ath11k_ahb {
+++	/* Serializes shared CE host IE1/IE2/IE3 register RMW across CPUs */
+++	spinlock_t ce_irq_lock;
++ 	struct rproc *tgt_rproc;
++ 	struct {
++ 		struct device *dev;
++--- a/drivers/net/wireless/ath/ath11k/ahb.c	2026-11-15 14:57:37.134404166 +0000
+++++ b/drivers/net/wireless/ath/ath11k/ahb.c	2026-11-15 14:57:37.134458228 +0000
++@@ -262,62 +262,45 @@
++ 		enable_irq(irq_grp->ab->irq_num[irq_grp->irqs[i]]);
++ }
++ 
++-static void ath11k_ahb_setbit32(struct ath11k_base *ab, u8 bit, u32 offset)
+++static void ath11k_ahb_modbit32(struct ath11k_base *ab, u8 bit, u32 offset, bool set)
++ {
++ 	u32 val;
++ 
++ 	val = ath11k_ahb_read32(ab, offset);
++-	ath11k_ahb_write32(ab, offset, val | BIT(bit));
+++	if (set)
+++		val |= BIT(bit);
+++	else
+++		val &= ~BIT(bit);
+++	ath11k_ahb_write32(ab, offset, val);
++ }
++ 
++-static void ath11k_ahb_clearbit32(struct ath11k_base *ab, u8 bit, u32 offset)
+++static void ath11k_ahb_ce_irq_set(struct ath11k_base *ab, u16 ce_id, bool enable)
++ {
++-	u32 val;
++-
++-	val = ath11k_ahb_read32(ab, offset);
++-	ath11k_ahb_write32(ab, offset, val & ~BIT(bit));
++-}
++-
++-static void ath11k_ahb_ce_irq_enable(struct ath11k_base *ab, u16 ce_id)
++-{
++-	const struct ce_attr *ce_attr;
+++	const struct ce_attr *ce_attr = &ab->hw_params.host_ce_config[ce_id];
++ 	const struct ce_ie_addr *ce_ie_addr = ab->hw_params.ce_ie_addr;
++-	u32 ie1_reg_addr, ie2_reg_addr, ie3_reg_addr;
++-
++-	ie1_reg_addr = ce_ie_addr->ie1_reg_addr;
++-	ie2_reg_addr = ce_ie_addr->ie2_reg_addr;
++-	ie3_reg_addr = ce_ie_addr->ie3_reg_addr;
+++	struct ath11k_ahb *ab_ahb = ath11k_ahb_priv(ab);
+++	unsigned long flags;
++ 
++-	ce_attr = &ab->hw_params.host_ce_config[ce_id];
+++	spin_lock_irqsave(&ab_ahb->ce_irq_lock, flags);
++ 	if (ce_attr->src_nentries)
++-		ath11k_ahb_setbit32(ab, ce_id, ie1_reg_addr);
+++		ath11k_ahb_modbit32(ab, ce_id, ce_ie_addr->ie1_reg_addr, enable);
++ 
++ 	if (ce_attr->dest_nentries) {
++-		ath11k_ahb_setbit32(ab, ce_id, ie2_reg_addr);
++-		ath11k_ahb_setbit32(ab, ce_id + CE_HOST_IE_3_SHIFT,
++-				    ie3_reg_addr);
+++		ath11k_ahb_modbit32(ab, ce_id, ce_ie_addr->ie2_reg_addr, enable);
+++		ath11k_ahb_modbit32(ab, ce_id + CE_HOST_IE_3_SHIFT,
+++				    ce_ie_addr->ie3_reg_addr, enable);
++ 	}
+++	spin_unlock_irqrestore(&ab_ahb->ce_irq_lock, flags);
++ }
++ 
++-static void ath11k_ahb_ce_irq_disable(struct ath11k_base *ab, u16 ce_id)
+++static void ath11k_ahb_ce_irq_enable(struct ath11k_base *ab, u16 ce_id)
++ {
++-	const struct ce_attr *ce_attr;
++-	const struct ce_ie_addr *ce_ie_addr = ab->hw_params.ce_ie_addr;
++-	u32 ie1_reg_addr, ie2_reg_addr, ie3_reg_addr;
++-
++-	ie1_reg_addr = ce_ie_addr->ie1_reg_addr;
++-	ie2_reg_addr = ce_ie_addr->ie2_reg_addr;
++-	ie3_reg_addr = ce_ie_addr->ie3_reg_addr;
++-
++-	ce_attr = &ab->hw_params.host_ce_config[ce_id];
++-	if (ce_attr->src_nentries)
++-		ath11k_ahb_clearbit32(ab, ce_id, ie1_reg_addr);
+++	ath11k_ahb_ce_irq_set(ab, ce_id, true);
+++}
++ 
++-	if (ce_attr->dest_nentries) {
++-		ath11k_ahb_clearbit32(ab, ce_id, ie2_reg_addr);
++-		ath11k_ahb_clearbit32(ab, ce_id + CE_HOST_IE_3_SHIFT,
++-				      ie3_reg_addr);
++-	}
+++static void ath11k_ahb_ce_irq_disable(struct ath11k_base *ab, u16 ce_id)
+++{
+++	ath11k_ahb_ce_irq_set(ab, ce_id, false);
++ }
++ 
++ static void ath11k_ahb_sync_ce_irqs(struct ath11k_base *ab)
++@@ -1231,6 +1214,7 @@
++ 	ab->userpd_id = userpd_id;
++ 	ab->fw_mode = ATH11K_FIRMWARE_MODE_NORMAL;
++ 	platform_set_drvdata(pdev, ab);
+++	spin_lock_init(&ath11k_ahb_priv(ab)->ce_irq_lock);
++ 
++ 	ret = ath11k_pcic_register_pci_ops(ab, pci_ops);
++ 	if (ret) {

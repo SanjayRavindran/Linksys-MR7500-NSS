@@ -5,7 +5,8 @@
 START=96
 NAME=mr7500-irq-tune
 
-WIFI_IRQ_PATTERN='(GIC-0.*(ce[0-9]|wbm2host|rxdma2host|host2rxdma|reo2host|ppdu-end)|DW-PCI-MSI.*(bhi|mhi|ce[0-9]|DP_EXT_IRQ))'
+AHB_CE_IRQ_PATTERN='GIC-0.*ce[0-9]'
+WIFI_IRQ_PATTERN='(GIC-0.*(wbm2host|rxdma2host|host2rxdma|reo2host|ppdu-end)|DW-PCI-MSI.*(bhi|mhi|ce[0-9]|DP_EXT_IRQ))'
 
 set_irq_mask() {
 	local irq="$1" mask="$2"
@@ -36,7 +37,12 @@ apply_pinning() {
 	set_irq_mask "$(get_irqs_matching 'nss_empty_buf_queue$')" 2
 	set_irq_mask "$(get_irqs_matching 'nss_empty_buf_sos$')" 4
 
-	# Distribute ath11k AHB (IPQ6018) and PCIe (QCN9074 DW-PCI-MSI) IRQs across CPUs 1..3
+	# Keep IPQ6018 AHB CE control/WMI IRQs serialized on one offloaded core (CPU 1)
+	for irq in $(get_irqs_matching "$AHB_CE_IRQ_PATTERN"); do
+		set_irq_mask "$irq" 2
+	done
+
+	# Distribute high-rate ath11k AHB DP IRQs and QCN9074 PCIe MSIs across CPUs 1..3
 	idx=0
 	for irq in $(get_irqs_matching "$WIFI_IRQ_PATTERN"); do
 		case $((idx % 3)) in
@@ -79,7 +85,7 @@ start() {
 
 stop() {
 	local irq
-	for irq in $(get_irqs_matching "(nss_queue[0-3]|nss_empty_buf_queue|nss_empty_buf_sos|$WIFI_IRQ_PATTERN)"); do
+	for irq in $(get_irqs_matching "(nss_queue[0-3]|nss_empty_buf_queue|nss_empty_buf_sos|$AHB_CE_IRQ_PATTERN|$WIFI_IRQ_PATTERN)"); do
 		set_irq_mask "$irq" "f"
 	done
 	logger -t "$NAME" "Reset NSS and Wi-Fi IRQ affinities to default (0xf)"
