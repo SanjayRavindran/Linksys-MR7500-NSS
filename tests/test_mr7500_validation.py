@@ -6,7 +6,7 @@ This suite performs an exhaustive 14-point regression test on the Linksys MR7500
 supporting both standard Router Mode and Switch + AP (Dumb AP) Mode.
 
 Usage:
-    python3 tests/test_mr7500_validation.py [--host ROUTER_IP] [--user USER]
+    python tests/test_mr7500_validation.py [--host ROUTER_IP] [--user USER]
 """
 
 import argparse
@@ -26,9 +26,11 @@ RESET = "\033[0m"
 
 
 class MR7500Validator:
-    def __init__(self, host="192.168.1.91", user="root"):
+    def __init__(self, host="192.168.1.91", user="root", password=None, vm_helper=None):
         self.host = host
         self.user = user
+        self.password = password if password is not None else os.environ.get("MR7500_ROUTER_PW", "")
+        self.vm_helper = vm_helper
         self.results = []
         self.passed = 0
         self.failed = 0
@@ -36,11 +38,49 @@ class MR7500Validator:
         self.is_ap_mode = False
 
     def ssh_exec(self, cmd, timeout=15):
-        remote_cmd = ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", f"{self.user}@{self.host}", cmd]
-        proc = subprocess.run(remote_cmd, capture_output=True, text=True, timeout=timeout)
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        """Execute command on the router via key-based SSH, paramiko, or VM helper fallback."""
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
+                 f"{self.user}@{self.host}", cmd],
+                capture_output=True, text=True, timeout=timeout
+            )
+            if proc.returncode == 0 or proc.stdout.strip():
+                return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        except Exception:
+            pass
+
+        # Native paramiko fallback (works cleanly from Windows even without SSH keys)
+        try:
+            import paramiko
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            if not self.password:
+                raise RuntimeError("No password/MR7500_ROUTER_PW configured")
+            client.connect(self.host, username=self.user, password=self.password, timeout=5)
+            _, out, err = client.exec_command(cmd, timeout=timeout)
+            stdout_txt = out.read().decode("utf-8", errors="replace").strip()
+            stderr_txt = err.read().decode("utf-8", errors="replace").strip()
+            rc = out.channel.recv_exit_status()
+            client.close()
+            return rc, stdout_txt, stderr_txt
+        except Exception:
+            pass
+
+        # Fallback to VM helper
+        helper = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), self.vm_helper) if self.vm_helper else ""
+        if helper and os.path.exists(helper):
+            remote_cmd = f"ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no {self.user}@{self.host} {cmd}"
+            proc = subprocess.run(
+                [sys.executable, helper, "--", remote_cmd],
+                capture_output=True, text=True, timeout=timeout
+            )
+            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+        return 1, "", "Execution failed"
 
     def detect_mode(self):
+        """Detect whether the router is in Router Mode or Switch + AP Mode."""
         rc, brif_out, _ = self.ssh_exec("ls /sys/class/net/br-lan/brif")
         self.is_ap_mode = "wan" in brif_out.split()
         mode_str = "Switch + AP Mode" if self.is_ap_mode else "Router Mode"
@@ -212,6 +252,7 @@ class MR7500Validator:
         dhcp_listening = ":67 " in netstat_out
 
         if self.is_ap_mode:
+            # In AP mode, DHCP server must be DISABLED to prevent rogue DHCP leases
             if uci_ignore.strip() == "1" and not dhcp_listening:
                 self.record("TC-07", "Local DHCP Server Cleanly Disabled (AP Mode)", "PASS",
                             "DHCP server ignore=1, UDP port 67 not listening. Rogue DHCP prevented.")
@@ -219,6 +260,7 @@ class MR7500Validator:
                 self.record("TC-07", "Local DHCP Server Cleanly Disabled (AP Mode)", "FAIL",
                             f"ignore={uci_ignore.strip()}, port 67 listening={dhcp_listening}")
         else:
+            # In Router mode, DHCP server must be running on 10.143.1.0/24
             rc, ip_out, _ = self.ssh_exec("ip -4 addr show br-lan")
             if "/24" in ip_out and "10.143.1.1" in ip_out and dhcp_listening:
                 self.record("TC-07", "LAN DHCPv4 Server & Local DNS Resolver", "PASS",

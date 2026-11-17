@@ -195,5 +195,27 @@ This document compiles all major engineering challenges, bugs, timing races, and
 * **Symptom:** `ipq6018-mr7500.dts` carried non-functional `&nss_macsec0 { phy_addr = <0x8>; };` (whereas `qca-nss-macsec` only supports QCA808x at `0x18`, not AQR114C at `0x8`) and active `blsp1_uart2` with broken `csr,8811 { enable-gpios = <&tlmm 34 GPIO_ACTIVE_LOW>; }` leaving GPIO 34 floating `in high` while registering unused `/dev/ttyMSM1`.
 * **Root Cause & Fix:** Removed `&nss_macsec0`, `serial1` alias, `hsuart_pins`/`btcoex_pins`, and disabled `&blsp1_uart2` while adding `&tlmm bt_reset_hog` (`gpios = <34 GPIO_ACTIVE_HIGH>; output-low;`) in `0004` to hold CSR8811 physically in reset.
 * **AQR114C DTS NVMEM Guard:** `mtd9` (`0:ethphyfw`) is an SMEM-partitioned flash region outside OpenWrt `kernel`/`rootfs` and retains factory `v5.4.B` even after stock firmware is completely removed. Never re-add `nvmem-cells = <&aqr_fw>` when rebasing against upstream OpenWrt DTS (`ci_test.sh` enforces this), ensuring AQR114C always loads `/lib/firmware/marvell/AQR114C.cld` (`v5.6.5 Cybertan Divo`).
+---
 
+### Issue 15: Aquantia AQR114C 5GbE Port Link Failure on Boot & Hotplug (`USXGMII` C37 AN Drop)
 
+* **Severity:** **Critical** (5GbE Port Unusable Until Repeated Interface Flaps or Unplug/Replug).
+* **Symptom:** When plugged into a 2.5GbE/5GbE switch at boot or hot-plugged after running, the `wan` port (`dp5-syn` / `AQR114C-B0`) either remained `Link detected: no` or silently dropped USXGMII Clause 37 auto-negotiation (`4/0xe812=0xb419` with `4/0xc441=0x0000` instead of `0x0008`), causing `uniphy autoneg time out` and total loss of forwarding.
+* **Root Cause:**
+  1. `aqr107_config_init()` / `aqr107_resume()` raced with the AQR114C microprocessor finishing firmware provisioning / processor-intensive operations (`MDIO_STAT1` / `VEND1_GLOBAL_SYS_CONFIG`), dropping writes to `VEND1_GLOBAL_CFG_100M` / `MDIO_PHYXS_VEND_PROV2` (`0xc441` USXGMII AN bit `0x0008`).
+  2. `aqr107_chip_info` / `aqr_config_aneg()` and `aqr107_read_status()` did not re-arm USXGMII Clause 37 auto-negotiation on hotplug or link-down transitions (`0xc441` cleared on copper renegotiation / sleep).
+* **Permanent Fix (`patches/0005-qualcommax-mr7500-harden-aqr114c-usxgmii-hotplug.patch`):**
+  1. Added `aqr_wait_fw_provisioning()` and `aqr_enable_usxgmii_autoneg()` polling readiness around AQR114C firmware boot, `config_init()`, `aqr107_resume()`, and `aqr_config_aneg()`.
+  2. Verified `VEND1_GLOBAL_CFG_*` (`VEND1_GLOBAL_CFG_100M`, etc.) and `MDIO_PHYXS_VEND_PROV2` (`0xc441=0x0008`) consistency across both cold boot and `wan` hotplugs (`2500Mb/s Full`).
+
+---
+
+### Issue 16: `ath11k_ahb` Copy Engine `ce3` Edge-IRQ Freeze (`-105`/`-ENOBUFS` WMI Timeout & `D`-State Hang)
+
+* **Severity:** **Critical** (Router Management/LuCI `/ubus` & Wi-Fi `hostapd` Hang After Extended Uptime).
+* **Symptom:** After ~23 hours of uptime, `ath11k c000000.wifi` logged `ce desc not available for wmi command ... (-105)` while Q6 remoteproc stayed running, leaving `rpcd` (`wchan=ath11k_wmi_cmd_send`) and `hostapd` (`wchan=rtnl_lock` / `cfg80211_ft_event`) hung in `D` state and timing out all LuCI `/ubus` wireless RPCs (`getWirelessDevices`, `iwinfo`). Edge-triggered `GIC-0 343 Edge ce3` froze completely (`65324` IRQs).
+* **Root Cause:** `ath11k_ahb_ce_interrupt_handler()` (hard IRQ) called `ath11k_ahb_ce_irq_disable()` and `ath11k_ahb_ce_tasklet()` (softirq) called `ath11k_ahb_ce_irq_enable()`, both doing unlocked read-modify-writes on shared `CE_HOST_IE_1/2/3` interrupt enable registers (`ie1_reg_addr`) across CEs while `mr7500-irq-tune` spread `ce0..ce3` across CPUs 1–3. Concurrent RMWs lost the `ce3` enable bit permanently on an edge-triggered GIC line.
+* **Permanent Fix (`patches/0006-qualcommax-mr7500-serialize-ath11k-ahb-ce-irq.patch` + `files/etc/init.d/mr7500-irq-tune`):**
+  1. Added dedicated `spinlock_t ce_irq_lock;` in `struct ath11k_ahb` (`ahb.h`), initialized in `ath11k_ahb_probe()`, and serialized all CE IE RMWs in `ahb.c` (`ath11k_ahb_ce_irq_set()` / `ath11k_ahb_modbit32()`) under `spin_lock_irqsave`/`spin_unlock_irqrestore`. (Avoids `ab->base_lock`, which uses `_bh` locks and would deadlock inside hard IRQ context.)
+  2. Updated `files/etc/init.d/mr7500-irq-tune` to pin `GIC-0 ce[0-9]` IRQs onto CPU 1 (`smp_affinity=2`) while still spreading high-rate `QCN9074` PCIe MSIs and DP IRQs across CPUs 1–3.
+  3. Added `files/etc/init.d/mr7500-persist-log` and `files/usr/sbin/mr7500-log-watch` (at `/etc/init.d/mr7500-persist-log` & `/usr/sbin/mr7500-log-watch`) for unbuffered 3-boot rotating persistent logs + crash/hang snapshots (`/root/boot-logs/`).

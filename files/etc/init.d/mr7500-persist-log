@@ -1,0 +1,89 @@
+#!/bin/sh /etc/rc.common
+# Persistent 3-boot full kernel + syslog + crash telemetry logger for Linksys MR7500
+
+START=13
+STOP=88
+
+USE_PROCD=1
+
+LOG_DIR="/root/boot-logs"
+BOOT_FLAG="/tmp/mr7500-persist-log.booted"
+MAX_FILE_KB=2048
+
+rotate_slot() {
+	local base="$1" ext="$2"
+	local i prev
+	rm -f "${LOG_DIR}/${base}-3.${ext}"
+	for i in 2 1 0; do
+		prev=$((i + 1))
+		if [ -e "${LOG_DIR}/${base}-${i}.${ext}" ]; then
+			mv -f "${LOG_DIR}/${base}-${i}.${ext}" "${LOG_DIR}/${base}-${prev}.${ext}"
+		fi
+	done
+}
+
+rotate_boots_once() {
+	mkdir -p "$LOG_DIR"
+	chmod 700 "$LOG_DIR"
+
+	if [ -f "$BOOT_FLAG" ]; then
+		{
+			echo ""
+			echo "=== SERVICE RESTARTED AT $(date -u '+%Y-%m-%d %H:%M:%S UTC') (uptime: $(cut -d' ' -f1 /proc/uptime)s) ==="
+		} >> "${LOG_DIR}/boot-0.log"
+		return 0
+	fi
+
+	rotate_slot "boot" "log"
+	rotate_slot "boot" "log.old"
+	rotate_slot "boot" "diag"
+
+	local seq=0
+	if [ -f "${LOG_DIR}/.boot_seq" ]; then
+		seq=$(cat "${LOG_DIR}/.boot_seq" 2>/dev/null || echo 0)
+	fi
+	case "$seq" in
+		''|*[!0-9]*) seq=0 ;;
+	esac
+	seq=$((seq + 1))
+	echo "$seq" > "${LOG_DIR}/.boot_seq"
+
+	local bpart
+	bpart=$(fw_printenv -n boot_part 2>/dev/null || echo "unknown")
+
+	{
+		echo "================================================================================"
+		echo "MR7500 PERSISTENT BOOT LOG | Boot #${seq} | boot_part=${bpart}"
+		echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC') | Uptime: $(cut -d' ' -f1 /proc/uptime)s"
+		echo "Kernel:  $(uname -a)"
+		echo "Cmdline: $(cat /proc/cmdline)"
+		echo "================================================================================"
+	} > "${LOG_DIR}/boot-0.log"
+
+	ln -sf "${LOG_DIR}/boot-0.log" "${LOG_DIR}/current.log"
+	touch "$BOOT_FLAG"
+	sync
+}
+
+start_service() {
+	rotate_boots_once
+
+	procd_open_instance persist_log
+	procd_set_param command /sbin/logread -f -l 9999 -t -F "${LOG_DIR}/boot-0.log" -S "$MAX_FILE_KB"
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+
+	procd_open_instance crash_watch
+	procd_set_param command /usr/sbin/mr7500-log-watch "${LOG_DIR}/boot-0.diag"
+	procd_set_param respawn 3600 10 0
+	procd_close_instance
+}
+
+stop_service() {
+	if [ -f "${LOG_DIR}/boot-0.log" ]; then
+		{
+			echo "=== SERVICE STOPPED AT $(date -u '+%Y-%m-%d %H:%M:%S UTC') (uptime: $(cut -d' ' -f1 /proc/uptime)s) ==="
+		} >> "${LOG_DIR}/boot-0.log"
+		sync
+	fi
+}

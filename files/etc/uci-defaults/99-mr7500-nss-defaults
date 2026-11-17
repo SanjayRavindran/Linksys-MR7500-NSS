@@ -42,6 +42,7 @@ if [ "$ALREADY_APPLIED" != "1" ] && [ "$IS_AP_MODE" != "1" ]; then
 fi
 
 uci -q set system.@system[0].mr7500_defaults_applied='1'
+uci -q set system.@system[0].log_size='512'
 uci -q commit system
 
 # 4. Configure ECM to use NSS hardware acceleration engine & enable bridge filtering
@@ -71,7 +72,7 @@ if [ -f /etc/modules.d/ath11k ]; then
 fi
 
 # 7. Enable NSS init services on boot
-for svc in skb_recycler qca-nss-ecm qca-nss-drv qca-nss-pbuf mr7500-irq-tune; do
+for svc in skb_recycler qca-nss-ecm qca-nss-drv qca-nss-pbuf mr7500-irq-tune mr7500-persist-log; do
     if [ -x "/etc/init.d/$svc" ]; then
         /etc/init.d/"$svc" enable 2>/dev/null || true
     fi

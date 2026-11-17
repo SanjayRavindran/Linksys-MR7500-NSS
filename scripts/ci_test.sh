@@ -28,7 +28,7 @@ SYNTAX_ERRORS=0
 for script in \
     "$REPO_ROOT"/scripts/*.sh \
     "$REPO_ROOT"/files/etc/rc.local \
-    "$REPO_ROOT"/files/usr/sbin/switch_mode \
+    "$REPO_ROOT"/files/usr/sbin/* \
     "$REPO_ROOT"/files/etc/firewall.d/* \
     "$REPO_ROOT"/files/etc/init.d/* \
     "$REPO_ROOT"/files/etc/uci-defaults/* \
@@ -267,6 +267,16 @@ if [ -x "$IRQ_SVC" ] && grep -q "mr7500-irq-tune" "$DEFAULTS_FILE" && grep -q "a
     log_pass "T9-OverlayInit" "mr7500-irq-tune is executable and wired into 99-mr7500-nss-defaults alongside host ath11k"
 else
     log_fail "T9-OverlayInit" "mr7500-irq-tune missing executable bit or not wired in 99-mr7500-nss-defaults"
+fi
+
+# 9b. Persistent 3-Boot Crash & Syslog Service
+echo "[*] Running Test 9b: Persistent 3-Boot Logger Overlay..."
+PERSIST_SVC="$REPO_ROOT/files/etc/init.d/mr7500-persist-log"
+WATCH_BIN="$REPO_ROOT/files/usr/sbin/mr7500-log-watch"
+if [ -x "$PERSIST_SVC" ] && [ -x "$WATCH_BIN" ] && grep -q "mr7500-persist-log" "$DEFAULTS_FILE" && grep -q "base}-3" "$PERSIST_SVC"; then
+    log_pass "T9b-PersistLog" "mr7500-persist-log and mr7500-log-watch are executable and wired into 99-mr7500-nss-defaults"
+else
+    log_fail "T9b-PersistLog" "mr7500-persist-log or mr7500-log-watch missing executable bit or defaults wiring"
 fi
 
 # 10. Switch+AP Dual Profile Integrity

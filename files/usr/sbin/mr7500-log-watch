@@ -1,0 +1,102 @@
+#!/bin/sh
+# Lightweight crash, hang, thermal, and driver anomaly watcher for MR7500
+
+DIAG_FILE="${1:-/root/boot-logs/boot-0.diag}"
+STATE_DIR="/tmp/mr7500-log-watch"
+DMESG_LAST_FILE="${STATE_DIR}/dmesg_lines"
+PREV_D_FILE="${STATE_DIR}/prev_d_pids"
+PATTERN='ce desc not available|wmi command|uniphy autoneg time out|oops|panic|bug:|call trace|soft lockup|rcu_sched|out of memory|kill process|q6v5.*fatal|ath11k.*(error|fail|timeout|warn)'
+
+mkdir -p "$STATE_DIR" "$(dirname "$DIAG_FILE")"
+
+write_snapshot() {
+	local reason="$1"
+	local ce3_cnt mem_avail load_avg max_temp d_procs
+	ce3_cnt=$(awk '/GIC-0.*ce3$/ {print $2+$3+$4+$5}' /proc/interrupts 2>/dev/null)
+	mem_avail=$(awk '/MemAvailable:/ {print int($2/1024)"MB"}' /proc/meminfo 2>/dev/null)
+	load_avg=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)
+	max_temp=$(awk 'BEGIN{m=0} {if($1+0>m)m=$1+0} END{printf "%.1fC", m/1000}' /sys/class/thermal/thermal_zone*/temp 2>/dev/null)
+	d_procs=$(ps w 2>/dev/null | awk '$4 ~ /^D/ {print $1":"$5}')
+
+	{
+		echo ""
+		echo "--------------------------------------------------------------------------------"
+		echo "SNAPSHOT [$(date -u '+%Y-%m-%d %H:%M:%S UTC')] uptime=$(cut -d' ' -f1 /proc/uptime)s reason=${reason}"
+		echo "load=[${load_avg}] mem_avail=${mem_avail} ce3_irq=${ce3_cnt:-?} max_temp=${max_temp}"
+		echo "D_state_procs: ${d_procs:-none}"
+		if [ -n "$d_procs" ]; then
+			for p in $d_procs; do
+				pid="${p%%:*}"
+				echo "  wchan($p): $(cat /proc/${pid}/wchan 2>/dev/null || echo '?')"
+			done
+		fi
+		echo "--- AQR & WAN ---"
+		echo "4/0xc441=$(phytool read wan/8:4/0xc441 2>/dev/null || echo '?') 4/0xe812=$(phytool read wan/8:4/0xe812 2>/dev/null || echo '?')"
+		ethtool wan 2>/dev/null | grep -E "Speed|Duplex|Link detected" || true
+		echo "--- GIC-0 CE & QCN IRQs ---"
+		grep -E "GIC-0.*ce[0-9]|DP_EXT_IRQ|nss_empty_buf" /proc/interrupts 2>/dev/null || true
+		echo "--- dmesg tail (last 25 lines) ---"
+		dmesg 2>/dev/null | tail -n 25
+	} >> "$DIAG_FILE"
+	sync
+}
+
+sleep 25
+LAST_LINES=$(dmesg 2>/dev/null | wc -l)
+echo "$LAST_LINES" > "$DMESG_LAST_FILE"
+write_snapshot "BOOT_BASELINE"
+
+tick=0
+while true; do
+	sleep 30
+	tick=$((tick + 1))
+
+	cur_lines=$(dmesg 2>/dev/null | wc -l)
+	prev_lines=$(cat "$DMESG_LAST_FILE" 2>/dev/null || echo 0)
+	[ "$cur_lines" -lt "$prev_lines" ] && prev_lines=0
+
+	alert=""
+	if [ "$cur_lines" -gt "$prev_lines" ]; then
+		start_line=$((prev_lines + 1))
+		hits=$(dmesg 2>/dev/null | sed -n "${start_line},${cur_lines}p" | grep -v "ramoops@" | grep -iE "$PATTERN" | head -n 5)
+		if [ -n "$hits" ]; then
+			alert="DMESG_ALERT"
+			logger -t mr7500-watch -p kern.crit "DMESG anomaly detected: $(echo "$hits" | tr '\n' ' ')"
+		fi
+	fi
+	echo "$cur_lines" > "$DMESG_LAST_FILE"
+
+	cur_d=$(ps w 2>/dev/null | awk '$4 ~ /^D/ {print $1}' | tr '\n' ' ')
+	prev_d=$(cat "$PREV_D_FILE" 2>/dev/null || true)
+	echo "$cur_d" > "$PREV_D_FILE"
+	if [ -n "$cur_d" ] && [ -n "$prev_d" ]; then
+		for pid in $cur_d; do
+			case " $prev_d " in
+				*" $pid "*)
+					alert="${alert:+$alert+}STUCK_D_STATE($pid)"
+					logger -t mr7500-watch -p daemon.err "Process PID $pid stuck in D-state (>30s), wchan=$(cat /proc/${pid}/wchan 2>/dev/null)"
+					;;
+			esac
+		done
+	fi
+
+	mem_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 999999)
+	if [ "${mem_kb:-999999}" -lt 24576 ]; then
+		alert="${alert:+$alert+}LOW_MEM(${mem_kb}kB)"
+		logger -t mr7500-watch -p daemon.warn "Low MemAvailable: ${mem_kb} kB"
+	fi
+
+	max_mc=$(awk 'BEGIN{m=0} {if($1+0>m)m=$1+0} END{print m}' /sys/class/thermal/thermal_zone*/temp 2>/dev/null || echo 0)
+	if [ "${max_mc:-0}" -ge 88000 ]; then
+		alert="${alert:+$alert+}HIGH_TEMP(${max_mc}mC)"
+		logger -t mr7500-watch -p daemon.warn "High thermal zone: ${max_mc} mC"
+	fi
+
+	if [ -n "$alert" ]; then
+		write_snapshot "$alert"
+	elif [ $((tick % 60)) -eq 0 ]; then
+		ce3=$(awk '/GIC-0.*ce3$/ {print $2+$3+$4+$5}' /proc/interrupts 2>/dev/null)
+		load1=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+		logger -t mr7500-watch "HEARTBEAT load=${load1} mem_avail=$((mem_kb / 1024))MB temp=$((max_mc / 1000))C ce3_irq=${ce3:-?}"
+	fi
+done

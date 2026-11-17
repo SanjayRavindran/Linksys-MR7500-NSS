@@ -170,7 +170,7 @@ Each workflow run and `--profile all` local build generates two validated binary
 
 ### Multi-Tier Automated Testing Architecture
 Every push and release must pass all automated test gates:
-1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 17 gates validating script syntax, Patches `0001`–`0004`, AQR114C DTS NVMEM downgrade protection (`T3d-AQRGuard`), credential hygiene, Router & Switch+AP profile integrity, TFTP loopback self-test (`T11-TFTPFlasher`), `LICENSE` & `SOURCES_AND_LICENSES.md`, sanitized REA analysis docs, and zero tracked binaries (`T13-NoTrackedBinaries`).
+1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 20 gates validating script syntax, Patches `0001`–`0006`, persistent 3-boot logging (`mr7500-persist-log`), AQR114C DTS NVMEM downgrade protection (`T3d-AQRGuard`), credential hygiene, Router & Switch+AP profile integrity, TFTP loopback self-test (`T11-TFTPFlasher`), `LICENSE` & `SOURCES_AND_LICENSES.md`, sanitized REA analysis docs, and zero tracked binaries (`T13-NoTrackedBinaries`).
 2. **Upstream Base Patch-Apply Gate:** Clones `qosmio/openwrt-ipq` (`92a2d104145c8d265851c4b388a41bd8e9c21cd9`) on Ubuntu 24.04 and proves all patches apply cleanly before any compilation starts.
 3. **Post-Build Artifact & SquashFS Verification ([`scripts/validate_build_artifacts.sh`](scripts/validate_build_artifacts.sh)):** 15 gates per profile verifying image sizes, SquashFS rootfs contents (`unsquashfs` checks for patched `qca-nss-pbuf`, executable `mr7500-irq-tune`, profile `network`/`dhcp` configs), FIT magic headers, AQR114C FIT DTB protection (`AQR-PROTECTION`), and SHA-256 checksums.
 
