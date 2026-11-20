@@ -168,6 +168,12 @@ class MR7500Validator:
         rc, carrier_out, _ = self.ssh_exec("cat /sys/class/net/wan/carrier")
         rc_phy, phy_reg, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:4/0xc441 || echo skipped")
         rc_fw, fw_rev, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:0x1e/0x0020 || echo skipped")
+        rc_led0, led0_reg, _ = self.ssh_exec("command -v phytool >/dev/null 2>&1 && phytool read wan/8:0x1e/0xc430 || echo skipped")
+        rc_hb, hb_out, _ = self.ssh_exec(
+            "if command -v phytool >/dev/null 2>&1; then "
+            "h1=$(phytool read wan/8:0x1e/0xc886); sleep 2; h2=$(phytool read wan/8:0x1e/0xc886); "
+            "echo \"$h1 $h2\"; else echo skipped; fi"
+        )
         rc_dt, aqr_dt, _ = self.ssh_exec(
             "D=$(find /sys/firmware/devicetree/base -name 'ethernet-phy@8' | head -n1); "
             "[ -e \"$D/nvmem-cells\" ] && echo nvmem_present || echo fs_only"
@@ -189,16 +195,41 @@ class MR7500Validator:
         phyxs_ok = (phy_val == "skipped") or (phy_val == "0x0008")
         fw_val = fw_rev.strip().lower()
         fw_ok = (fw_val == "skipped") or (fw_val == "0x0506")
+        led0_val = led0_reg.strip().lower()
+        if led0_val == "skipped":
+            led_stretch_ok = True
+        else:
+            try:
+                led_stretch_ok = (int(led0_val, 16) & 0x3) == 0x3
+            except ValueError:
+                led_stretch_ok = False
+        hb_str = hb_out.strip().lower()
+        if hb_str == "skipped":
+            hb_ok = True
+            hb_disp = "skipped"
+        else:
+            parts = hb_str.split()
+            try:
+                hb1 = int(parts[0], 16)
+                hb2 = int(parts[1], 16)
+                hb_ok = (hb1 != hb2) and (hb2 not in (0, 0xffff))
+                hb_disp = f"{parts[0]}->{parts[1]}"
+            except (IndexError, ValueError):
+                hb_ok = False
+                hb_disp = hb_str
         dt_ok = aqr_dt.strip() == "fs_only"
         led_off_vals = led_off_out.split()
         leds_offloaded = len(led_off_vals) == 2 and all(v == "1" for v in led_off_vals)
 
-        if is_link_up and carrier_up and int(speed) >= 1000 and phyxs_ok and fw_ok and dt_ok and leds_offloaded:
+        if (is_link_up and carrier_up and int(speed) >= 1000 and phyxs_ok and
+                fw_ok and led_stretch_ok and hb_ok and dt_ok and leds_offloaded):
             self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN, AQR Guard & HW LEDs", "PASS",
-                        f"Link UP @ {speed} Mb/s Full (4:0xc441={phy_val}, FW={fw_val} [{aqr_dt.strip()}], LEDs offloaded=1/1, rx_frame: {rx_frames}).")
+                        f"Link UP @ {speed} Mb/s Full (4:0xc441={phy_val}, FW={fw_val} [{aqr_dt.strip()}], "
+                        f"led0={led0_val}, hb={hb_disp}, LEDs offloaded=1/1, rx_frame: {rx_frames}).")
         else:
             self.record("TC-04", "Marvell/Aquantia 5GbE Port, USXGMII AN, AQR Guard & HW LEDs", "FAIL",
-                        f"Link={is_link_up}, carrier={carrier_out.strip()}, Speed={speed}, 4:0xc441={phy_val}, FW={fw_val}, DT={aqr_dt.strip()}, LED={led_off_vals}")
+                        f"Link={is_link_up}, carrier={carrier_out.strip()}, Speed={speed}, 4:0xc441={phy_val}, "
+                        f"FW={fw_val}, led0={led0_val}, hb={hb_disp}, DT={aqr_dt.strip()}, LED={led_off_vals}")
 
     def test_05_switch_fabric_and_bridge_ports(self):
         rc, brif_out, _ = self.ssh_exec("ls /sys/class/net/br-lan/brif")

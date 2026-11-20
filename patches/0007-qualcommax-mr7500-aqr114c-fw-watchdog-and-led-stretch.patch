@@ -1,0 +1,1121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
+Date: Fri, 20 Nov 2026 23:10:00 +0530
+Subject: [PATCH] qualcommax: mr7500: add AQR114C FW watchdog reload and LED blink stretch
+
+Add kernel patch 0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch to:
+- Fix inverted VEND1_GLOBAL_LED_PROV_ACT_STRETCH GENMASK(1, 0), enable
+  100 ms blink stretch on TX/RX activity, and cache/restore PHY LED
+  hardware-control rules via aqr_phy_led_restore().
+- Monitor VEND1_GLOBAL_FW_ID (30:0x0020) and VEND1_GLOBAL_RSVD_STAT2
+  heartbeat (30:0xc886) and offload aqr_firmware_reload() to
+  system_unbound_wq (aqr107_fw_reload_work) with cond_resched(),
+  suspend/remove cancellation, exponential backoff (30s..300s), and
+  consecutive failure cap (AQR_FW_RELOAD_MAX_FAILS=5).
+
+---
+ ...-phy-aquantia-fw-watchdog-and-led-stretch.patch | 1095 +++++++++++++++++++++
+ 1 file changed, 1095 insertions(+)
+ create mode 100644 target/linux/qualcommax/patches-6.12/0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch
+
+diff --git a/target/linux/qualcommax/patches-6.12/0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch b/target/linux/qualcommax/patches-6.12/0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/target/linux/qualcommax/patches-6.12/0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch
+@@ -0,0 +1,1095 @@
++From: Sanjay Ravindran <mail2snjyrvndrn@gmail.com>
++Subject: [PATCH] net: phy: aquantia: add async FW watchdog reload and fix LED blink stretch
++
++Flashless Aquantia AQR114C PHYs run volatile firmware loaded over MDIO
++(e.g., marvell/AQR114C.cld). Cable hotplug transients or internal resets
++can drop the PHY back to boot-ROM (VEND1_GLOBAL_FW_ID 30:0x0020 == 0,
++VEND1_GLOBAL_SC == 0x8000) or stall the firmware heartbeat counter
++(30:0xc886), leaving the 5GbE link permanently down until reboot.
++
++Additionally, VEND1_GLOBAL_LED_PROV_ACT_STRETCH was inverted as
++GENMASK(0, 1) and never enabled in aqr_phy_led_hw_control_set(), leaving
++activity blink stretch at 0 ms so LEDs appear solid on multi-gig links;
++any firmware reset also clears LED provisioning registers (30:0xc430..c43a).
++
++Fix both issues safely without lock stalls, phylib error latches, or
++CPU/MDIO overload:
++- Fix VEND1_GLOBAL_LED_PROV_ACT_STRETCH to GENMASK(1, 0) and enable 100 ms
++  stretch (0x3) when TX/RX netdev hardware offload triggers are requested.
++- Cache and restore PHY LED hardware-control rules alongside polarity in
++  aqr_phy_led_restore() across config_init, resume, and firmware reload.
++- Offload aqr_firmware_reload() (30:0x2680 trigger + NVMEM/FS load +
++  USXGMII C37 AN / LED restore) to an asynchronous work_struct
++  (fw_reload_work on system_unbound_wq), holding neither rtnl_lock nor
++  phydev->lock during the ~29s MDIO upload, and guard concurrent hwmon,
++  ethtool, LED, IRQ, and polling MDIO accesses with fw_reloading.
++- Check MDIO return codes and insert cond_resched() + fw_reload_abort
++  checks every 256 words in aqr_fw_load_memory() for RCU/scheduler health
++  under CONFIG_PREEMPT_NONE and rapid cancellation in suspend/remove.
++- Never return reload errors from aqr107_read_status() (avoids permanent
++  PHY_ERROR/PHY_HALTED latch in phylib), apply exponential backoff
++  (30s..300s), and cap consecutive reloads at AQR_FW_RELOAD_MAX_FAILS (5)
++  unless sustained healthy operation (>= 60s) or interface restart occurs.
++
++diff -uNr a/drivers/net/phy/aquantia/aquantia.h b/drivers/net/phy/aquantia/aquantia.h
++--- a/drivers/net/phy/aquantia/aquantia.h	2026-11-20 17:35:19.263567847 +0000
+++++ b/drivers/net/phy/aquantia/aquantia.h	2026-11-20 17:39:17.181751400 +0000
++@@ -9,8 +9,10 @@
++ #ifndef AQUANTIA_H
++ #define AQUANTIA_H
++ 
+++#include <linux/atomic.h>
++ #include <linux/device.h>
++ #include <linux/phy.h>
+++#include <linux/workqueue.h>
++ 
++ /* Vendor specific 1, MDIO_MMD_VEND1 */
++ #define VEND1_GLOBAL_SC				0x0
++@@ -21,6 +23,9 @@
++ #define VEND1_GLOBAL_FW_ID_MAJOR		GENMASK(15, 8)
++ #define VEND1_GLOBAL_FW_ID_MINOR		GENMASK(7, 0)
++ 
+++#define VEND1_GLOBAL_NVR_RESET			0x2680
+++#define VEND1_GLOBAL_NVR_RESET_TRIGGER		BIT(0)
+++
++ #define VEND1_GLOBAL_MAILBOX_INTERFACE1			0x0200
++ #define VEND1_GLOBAL_MAILBOX_INTERFACE1_EXECUTE		BIT(15)
++ #define VEND1_GLOBAL_MAILBOX_INTERFACE1_WRITE		BIT(14)
++@@ -76,7 +81,8 @@
++ #define VEND1_GLOBAL_LED_PROV_LINK100		BIT(5)
++ #define VEND1_GLOBAL_LED_PROV_RX_ACT		BIT(3)
++ #define VEND1_GLOBAL_LED_PROV_TX_ACT		BIT(2)
++-#define VEND1_GLOBAL_LED_PROV_ACT_STRETCH	GENMASK(0, 1)
+++#define VEND1_GLOBAL_LED_PROV_ACT_STRETCH	GENMASK(1, 0)
+++#define VEND1_GLOBAL_LED_PROV_ACT_STRETCH_100MS	0x3
++ 
++ #define VEND1_GLOBAL_LED_PROV_LINK_MASK		(VEND1_GLOBAL_LED_PROV_LINK100 | \
++ 						 VEND1_GLOBAL_LED_PROV_LINK1000 | \
++@@ -107,6 +113,7 @@
++ #define VEND1_GLOBAL_RSVD_STAT1			0xc885
++ #define VEND1_GLOBAL_RSVD_STAT1_FW_BUILD_ID	GENMASK(7, 4)
++ #define VEND1_GLOBAL_RSVD_STAT1_PROV_ID		GENMASK(3, 0)
+++#define VEND1_GLOBAL_RSVD_STAT2			0xc886
++ 
++ #define VEND1_GLOBAL_RSVD_STAT9			0xc88d
++ #define VEND1_GLOBAL_RSVD_STAT9_MODE		GENMASK(7, 0)
++@@ -152,6 +159,11 @@
++ 
++ #define AQR_MAX_LEDS				3
++ 
+++#define AQR_FW_RELOAD_MIN_BACKOFF_S		30
+++#define AQR_FW_RELOAD_MAX_BACKOFF_S		300
+++#define AQR_FW_RELOAD_MAX_FAILS			5
+++#define AQR_FW_HEALTHY_RESET_S			60
+++
++ struct aqr107_hw_stat {
++ 	const char *name;
++ 	int reg;
++@@ -178,6 +190,20 @@
++ 	u64 sgmii_stats[AQR107_SGMII_STAT_SZ];
++ 	unsigned long leds_active_low;
++ 	unsigned long leds_active_high;
+++	unsigned long led_hw_ctrl;
+++	unsigned long led_rules[AQR_MAX_LEDS];
+++	struct work_struct fw_reload_work;
+++	struct phy_device *phydev;
+++	atomic_t fw_reloading;
+++	atomic_t fw_reload_abort;
+++	unsigned long last_reload_jiffies;
+++	unsigned long fw_healthy_since;
+++	u16 last_fw_heartbeat;
+++	u8 fw_stuck_cnt;
+++	u8 fw_reload_fails;
+++	bool fw_hb_seen;
+++	bool fw_loaded;
+++	bool fw_reload_disabled;
++ };
++ 
++ #if IS_REACHABLE(CONFIG_HWMON)
++@@ -187,6 +213,7 @@
++ #endif
++ 
++ int aqr_firmware_load(struct phy_device *phydev);
+++int aqr_firmware_reload(struct phy_device *phydev);
++ 
++ int aqr_phy_led_blink_set(struct phy_device *phydev, u8 index,
++ 			  unsigned long *delay_on,
++@@ -202,6 +229,7 @@
++ int aqr_phy_led_active_low_set(struct phy_device *phydev, int index, bool enable);
++ int aqr_phy_led_polarity_set(struct phy_device *phydev, int index,
++ 			     unsigned long modes);
+++int aqr_phy_led_restore(struct phy_device *phydev);
++ int aqr_wait_reset_complete(struct phy_device *phydev);
++ 
++ #endif /* AQUANTIA_H */
++diff -uNr a/drivers/net/phy/aquantia/aquantia_firmware.c b/drivers/net/phy/aquantia/aquantia_firmware.c
++--- a/drivers/net/phy/aquantia/aquantia_firmware.c	2026-11-20 17:35:19.263334834 +0000
+++++ b/drivers/net/phy/aquantia/aquantia_firmware.c	2026-11-20 17:39:17.182046478 +0000
++@@ -1,7 +1,9 @@
++ // SPDX-License-Identifier: GPL-2.0
++ 
++ #include <linux/bitfield.h>
+++#include <linux/delay.h>
++ #include <linux/of.h>
+++#include <linux/sched.h>
++ #include <linux/firmware.h>
++ #include <linux/crc-itu-t.h>
++ #include <linux/nvmem-consumer.h>
++@@ -90,18 +92,26 @@
++ static int aqr_fw_load_memory(struct phy_device *phydev, u32 addr,
++ 			      const u8 *data, size_t len)
++ {
++-	u16 crc = 0, up_crc;
+++	struct aqr107_priv *priv = phydev->priv;
+++	u16 crc = 0;
+++	int up_crc, ret;
++ 	size_t pos;
++ 
++-	phy_write_mmd(phydev, MDIO_MMD_VEND1,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE1,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE1_CRC_RESET);
++-	phy_write_mmd(phydev, MDIO_MMD_VEND1,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE3,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE3_MSW_ADDR(addr));
++-	phy_write_mmd(phydev, MDIO_MMD_VEND1,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE4,
++-		      VEND1_GLOBAL_MAILBOX_INTERFACE4_LSW_ADDR(addr));
+++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE1,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE1_CRC_RESET);
+++	if (ret)
+++		return ret;
+++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE3,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE3_MSW_ADDR(addr));
+++	if (ret)
+++		return ret;
+++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE4,
+++			    VEND1_GLOBAL_MAILBOX_INTERFACE4_LSW_ADDR(addr));
+++	if (ret)
+++		return ret;
++ 
++ 	/* We assume and enforce the size to be word aligned.
++ 	 * If a firmware that is not word aligned is found, please report upstream.
++@@ -110,17 +120,29 @@
++ 		u8 crc_data[4];
++ 		u32 word;
++ 
+++		if (!(pos & 0x3ff)) {
+++			if (priv && atomic_read(&priv->fw_reload_abort))
+++				return -ECANCELED;
+++			cond_resched();
+++		}
+++
++ 		/* FW data is always stored in little-endian */
++ 		word = get_unaligned_le32((const u32 *)(data + pos));
++ 
++-		phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE5,
++-			      VEND1_GLOBAL_MAILBOX_INTERFACE5_MSW_DATA(word));
++-		phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE6,
++-			      VEND1_GLOBAL_MAILBOX_INTERFACE6_LSW_DATA(word));
++-
++-		phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE1,
++-			      VEND1_GLOBAL_MAILBOX_INTERFACE1_EXECUTE |
++-			      VEND1_GLOBAL_MAILBOX_INTERFACE1_WRITE);
+++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE5,
+++				    VEND1_GLOBAL_MAILBOX_INTERFACE5_MSW_DATA(word));
+++		if (ret)
+++			return ret;
+++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE6,
+++				    VEND1_GLOBAL_MAILBOX_INTERFACE6_LSW_DATA(word));
+++		if (ret)
+++			return ret;
+++
+++		ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE1,
+++				    VEND1_GLOBAL_MAILBOX_INTERFACE1_EXECUTE |
+++				    VEND1_GLOBAL_MAILBOX_INTERFACE1_WRITE);
+++		if (ret)
+++			return ret;
++ 
++ 		/* Word is swapped internally and MAILBOX CRC is calculated
++ 		 * using big-endian order. Mimic what the PHY does to have a
++@@ -136,6 +158,8 @@
++ 	}
++ 	/* ...gets CRC from MAILBOX after we have loaded the entire section... */
++ 	up_crc = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_MAILBOX_INTERFACE2);
+++	if (up_crc < 0)
+++		return up_crc;
++ 	/* ...and make sure it does match our calculated CRC */
++ 	if (crc != up_crc) {
++ 		phydev_err(phydev, "CRC mismatch: calculated 0x%04x PHY 0x%04x\n",
++@@ -311,7 +335,7 @@
++ 	}
++ 
++ 	ret = aqr_fw_boot(phydev, buf, size, AQR_FW_SRC_NVMEM);
++-	if (ret)
+++	if (ret && ret != -ECANCELED)
++ 		phydev_err(phydev, "firmware loading failed: %d\n", ret);
++ 
++ 	kfree(buf);
++@@ -341,7 +365,7 @@
++ 	}
++ 
++ 	ret = aqr_fw_boot(phydev, fw->data, fw->size, AQR_FW_SRC_FS);
++-	if (ret)
+++	if (ret && ret != -ECANCELED)
++ 		phydev_err(phydev, "firmware loading failed: %d\n", ret);
++ 
++ 	release_firmware(fw);
++@@ -349,6 +373,14 @@
++ 	return ret;
++ }
++ 
+++static void aqr_mark_fw_managed(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv)
+++		priv->fw_loaded = true;
+++}
+++
++ int aqr_firmware_load(struct phy_device *phydev)
++ {
++ 	int ret;
++@@ -359,7 +391,10 @@
++ 	ret = aqr_wait_reset_complete(phydev);
++ 	switch (ret) {
++ 	case 0:
++-		/* Some firmware is loaded => do nothing */
+++		/* Some firmware is loaded; manage runtime reloads if FW source exists */
+++		if (of_property_present(phydev->mdio.dev.of_node, "firmware-name") ||
+++		    of_property_present(phydev->mdio.dev.of_node, "nvmem-cells"))
+++			aqr_mark_fw_managed(phydev);
++ 		return 0;
++ 	case -ETIMEDOUT:
++ 		/* VEND1_GLOBAL_FW_ID still reads 0 after 2 seconds of polling.
++@@ -368,12 +403,15 @@
++ 		 * assume that, and load a new image.
++ 		 */
++ 		ret = aqr_firmware_load_nvmem(phydev);
+++		if (!ret)
+++			aqr_mark_fw_managed(phydev);
++ 		if (ret == -EPROBE_DEFER || !ret)
++ 			return ret;
++ 
++ 		ret = aqr_firmware_load_fs(phydev);
++ 		if (ret)
++ 			return ret;
+++		aqr_mark_fw_managed(phydev);
++ 		break;
++ 	default:
++ 		/* PHY read error, propagate it to the caller */
++@@ -382,3 +420,27 @@
++ 
++ 	return 0;
++ }
+++
+++int aqr_firmware_reload(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++	int ret;
+++
+++	if (priv && atomic_read(&priv->fw_reload_abort))
+++		return -ECANCELED;
+++
+++	ret = phy_write_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_NVR_RESET,
+++			    VEND1_GLOBAL_NVR_RESET_TRIGGER);
+++	if (ret)
+++		return ret;
+++	msleep(100);
+++
+++	if (priv && atomic_read(&priv->fw_reload_abort))
+++		return -ECANCELED;
+++
+++	ret = aqr_firmware_load_nvmem(phydev);
+++	if (ret == -EPROBE_DEFER || ret == -ECANCELED || !ret)
+++		return ret;
+++
+++	return aqr_firmware_load_fs(phydev);
+++}
++diff -uNr a/drivers/net/phy/aquantia/aquantia_hwmon.c b/drivers/net/phy/aquantia/aquantia_hwmon.c
++--- a/drivers/net/phy/aquantia/aquantia_hwmon.c	2026-06-01 15:46:33.000000000 +0000
+++++ b/drivers/net/phy/aquantia/aquantia_hwmon.c	2026-11-20 17:39:17.182470689 +0000
++@@ -91,8 +91,12 @@
++ 			  u32 attr, int channel, long *value)
++ {
++ 	struct phy_device *phydev = dev_get_drvdata(dev);
+++	struct aqr107_priv *priv = phydev->priv;
++ 	int reg;
++ 
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return -EBUSY;
+++
++ 	if (type != hwmon_temp)
++ 		return -EOPNOTSUPP;
++ 
++@@ -144,6 +148,10 @@
++ 			   u32 attr, int channel, long value)
++ {
++ 	struct phy_device *phydev = dev_get_drvdata(dev);
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return -EBUSY;
++ 
++ 	if (type != hwmon_temp)
++ 		return -EOPNOTSUPP;
++diff -uNr a/drivers/net/phy/aquantia/aquantia_leds.c b/drivers/net/phy/aquantia/aquantia_leds.c
++--- a/drivers/net/phy/aquantia/aquantia_leds.c	2026-11-20 17:35:19.263733486 +0000
+++++ b/drivers/net/phy/aquantia/aquantia_leds.c	2026-11-20 17:39:17.182287807 +0000
++@@ -4,6 +4,7 @@
++  * Author: Daniel Golle <daniel@makrotopia.org>
++  */
++ 
+++#include <linux/bitfield.h>
++ #include <linux/phy.h>
++ 
++ #include "aquantia.h"
++@@ -11,14 +12,23 @@
++ int aqr_phy_led_brightness_set(struct phy_device *phydev,
++ 			       u8 index, enum led_brightness value)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
+++
++ 	if (index >= AQR_MAX_LEDS)
++ 		return -EINVAL;
++ 
+++	if (priv) {
+++		__clear_bit(index, &priv->led_hw_ctrl);
+++		if (atomic_read(&priv->fw_reloading))
+++			return 0;
+++	}
+++
++ 	return phy_modify_mmd(phydev, MDIO_MMD_VEND1, AQR_LED_PROV(index),
++ 			      VEND1_GLOBAL_LED_PROV_LINK_MASK |
++ 			      VEND1_GLOBAL_LED_PROV_FORCE_ON |
++ 			      VEND1_GLOBAL_LED_PROV_RX_ACT |
++-			      VEND1_GLOBAL_LED_PROV_TX_ACT,
+++			      VEND1_GLOBAL_LED_PROV_TX_ACT |
+++			      VEND1_GLOBAL_LED_PROV_ACT_STRETCH,
++ 			      value ? VEND1_GLOBAL_LED_PROV_FORCE_ON : 0);
++ }
++ 
++@@ -47,11 +57,18 @@
++ int aqr_phy_led_hw_control_get(struct phy_device *phydev, u8 index,
++ 			       unsigned long *rules)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
++ 	int val;
++ 
++ 	if (index >= AQR_MAX_LEDS)
++ 		return -EINVAL;
++ 
+++	if (priv && atomic_read(&priv->fw_reloading)) {
+++		*rules = test_bit(index, &priv->led_hw_ctrl) ?
+++			 priv->led_rules[index] : 0;
+++		return 0;
+++	}
+++
++ 	val = phy_read_mmd(phydev, MDIO_MMD_VEND1, AQR_LED_PROV(index));
++ 	if (val < 0)
++ 		return val;
++@@ -81,8 +98,8 @@
++ 	return 0;
++ }
++ 
++-int aqr_phy_led_hw_control_set(struct phy_device *phydev, u8 index,
++-			       unsigned long rules)
+++static int aqr_phy_led_hw_control_apply(struct phy_device *phydev, u8 index,
+++					unsigned long rules)
++ {
++ 	u16 val = 0;
++ 
++@@ -110,11 +127,43 @@
++ 	if (rules & BIT(TRIGGER_NETDEV_TX))
++ 		val |= VEND1_GLOBAL_LED_PROV_TX_ACT;
++ 
+++	if (rules & (BIT(TRIGGER_NETDEV_RX) | BIT(TRIGGER_NETDEV_TX)))
+++		val |= FIELD_PREP(VEND1_GLOBAL_LED_PROV_ACT_STRETCH,
+++				  VEND1_GLOBAL_LED_PROV_ACT_STRETCH_100MS);
+++
++ 	return phy_modify_mmd(phydev, MDIO_MMD_VEND1, AQR_LED_PROV(index),
++ 			      VEND1_GLOBAL_LED_PROV_LINK_MASK |
++ 			      VEND1_GLOBAL_LED_PROV_FORCE_ON |
++ 			      VEND1_GLOBAL_LED_PROV_RX_ACT |
++-			      VEND1_GLOBAL_LED_PROV_TX_ACT, val);
+++			      VEND1_GLOBAL_LED_PROV_TX_ACT |
+++			      VEND1_GLOBAL_LED_PROV_ACT_STRETCH, val);
+++}
+++
+++int aqr_phy_led_hw_control_set(struct phy_device *phydev, u8 index,
+++			       unsigned long rules)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++	int ret;
+++
+++	if (index >= AQR_MAX_LEDS)
+++		return -EINVAL;
+++
+++	if (priv && atomic_read(&priv->fw_reloading)) {
+++		priv->led_rules[index] = rules;
+++		__set_bit(index, &priv->led_hw_ctrl);
+++		return 0;
+++	}
+++
+++	ret = aqr_phy_led_hw_control_apply(phydev, index, rules);
+++	if (ret)
+++		return ret;
+++
+++	if (priv) {
+++		priv->led_rules[index] = rules;
+++		__set_bit(index, &priv->led_hw_ctrl);
+++	}
+++
+++	return 0;
++ }
++ 
++ int aqr_phy_led_active_low_set(struct phy_device *phydev, int index, bool enable)
++@@ -153,8 +202,42 @@
++ 	if (force_active_high)
++ 		priv->leds_active_high |= BIT(index);
++ 
++-	if (force_active_high || force_active_low)
+++	if (force_active_high || force_active_low) {
+++		if (priv && atomic_read(&priv->fw_reloading))
+++			return 0;
++ 		return aqr_phy_led_active_low_set(phydev, index, force_active_low);
+++	}
++ 
++ 	return -EINVAL;
++ }
+++
+++int aqr_phy_led_restore(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++	u32 led_idx;
+++	int ret;
+++
+++	if (!priv)
+++		return 0;
+++
+++	for_each_set_bit(led_idx, &priv->leds_active_low, AQR_MAX_LEDS) {
+++		ret = aqr_phy_led_active_low_set(phydev, led_idx, true);
+++		if (ret)
+++			return ret;
+++	}
+++
+++	for_each_set_bit(led_idx, &priv->leds_active_high, AQR_MAX_LEDS) {
+++		ret = aqr_phy_led_active_low_set(phydev, led_idx, false);
+++		if (ret)
+++			return ret;
+++	}
+++
+++	for_each_set_bit(led_idx, &priv->led_hw_ctrl, AQR_MAX_LEDS) {
+++		ret = aqr_phy_led_hw_control_apply(phydev, led_idx,
+++						   priv->led_rules[led_idx]);
+++		if (ret)
+++			return ret;
+++	}
+++
+++	return 0;
+++}
++diff -uNr a/drivers/net/phy/aquantia/aquantia_main.c b/drivers/net/phy/aquantia/aquantia_main.c
++--- a/drivers/net/phy/aquantia/aquantia_main.c	2026-11-20 17:35:19.263950095 +0000
+++++ b/drivers/net/phy/aquantia/aquantia_main.c	2026-11-20 17:39:17.183788985 +0000
++@@ -10,6 +10,7 @@
++ #include <linux/kernel.h>
++ #include <linux/module.h>
++ #include <linux/delay.h>
+++#include <linux/jiffies.h>
++ #include <linux/bitfield.h>
++ #include <linux/of.h>
++ #include <linux/phy.h>
++@@ -167,6 +168,12 @@
++ 	u64 val;
++ 	int i;
++ 
+++	if (priv && atomic_read(&priv->fw_reloading)) {
+++		for (i = 0; i < AQR107_SGMII_STAT_SZ; i++)
+++			data[i] = priv->sgmii_stats[i];
+++		return;
+++	}
+++
++ 	for (i = 0; i < AQR107_SGMII_STAT_SZ; i++) {
++ 		val = aqr107_get_stat(phydev, i);
++ 		if (val == U64_MAX)
++@@ -223,7 +230,7 @@
++ 	return phy_set_bits_mmd(phydev, MDIO_MMD_PHYXS, 0xc441, 0x0008);
++ }
++ 
++-static int aqr_config_aneg(struct phy_device *phydev)
+++static int __aqr_config_aneg(struct phy_device *phydev)
++ {
++ 	bool changed = false;
++ 	u16 reg;
++@@ -276,6 +283,16 @@
++ 	return genphy_c45_check_and_restart_aneg(phydev, changed);
++ }
++ 
+++static int aqr_config_aneg(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return 0;
+++
+++	return __aqr_config_aneg(phydev);
+++}
+++
++ static struct {
++ 	u16 syscfg;
++ 	int cnt;
++@@ -291,8 +308,8 @@
++ 					   AQUANTIA_VND1_GSTART_RATE_10G},
++ };
++ 
++-/* Sets up protocol on system side before calling aqr_config_aneg */
++-static int aqr_config_aneg_set_prot(struct phy_device *phydev)
+++/* Sets up protocol on system side before calling __aqr_config_aneg */
+++static int __aqr_config_aneg_set_prot(struct phy_device *phydev)
++ {
++ 	int if_type = phydev->interface;
++ 	int i;
++@@ -324,7 +341,17 @@
++ 	phy_write_mmd(phydev, MDIO_MMD_VEND1, AQUANTIA_VND1_GLOBAL_SC, 0);
++ 	mdelay(10);
++ 
++-	return aqr_config_aneg(phydev);
+++	return __aqr_config_aneg(phydev);
+++}
+++
+++static int aqr_config_aneg_set_prot(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return 0;
+++
+++	return __aqr_config_aneg_set_prot(phydev);
++ }
++ 
++ static int aqr_config_intr(struct phy_device *phydev)
++@@ -367,8 +394,12 @@
++ 
++ static irqreturn_t aqr_handle_interrupt(struct phy_device *phydev)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
++ 	int irq_status;
++ 
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return IRQ_NONE;
+++
++ 	irq_status = phy_read_mmd(phydev, MDIO_MMD_AN,
++ 				  MDIO_AN_TX_VEND_INT_STATUS2);
++ 	if (irq_status < 0) {
++@@ -461,10 +492,233 @@
++ 	return 0;
++ }
++ 
+++static int aqr107_config_init(struct phy_device *phydev);
+++static int aqr_config_intr(struct phy_device *phydev);
+++
+++static unsigned long aqr107_reload_backoff_jiffies(u8 fails)
+++{
+++	if (!fails)
+++		return 0;
+++
+++	return min_t(unsigned long,
+++		     (unsigned long)AQR_FW_RELOAD_MIN_BACKOFF_S <<
+++		     min_t(u8, fails - 1, 4),
+++		     AQR_FW_RELOAD_MAX_BACKOFF_S) * HZ;
+++}
+++
+++static bool aqr107_schedule_fw_reload(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	lockdep_assert_held(&phydev->lock);
+++
+++	if (!priv || !priv->fw_loaded || priv->fw_reload_disabled ||
+++	    atomic_read(&priv->fw_reload_abort))
+++		return false;
+++
+++	if (priv->fw_reload_fails >= AQR_FW_RELOAD_MAX_FAILS) {
+++		priv->fw_reload_disabled = true;
+++		phydev_err(phydev,
+++			   "AQR firmware reload cap (%u) reached; disabling automatic retries until interface restart\n",
+++			   priv->fw_reload_fails);
+++		return false;
+++	}
+++
+++	if (atomic_cmpxchg(&priv->fw_reloading, 0, 1) != 0)
+++		return true;
+++
+++	smp_mb__after_atomic();
+++	if (atomic_read(&priv->fw_reload_abort)) {
+++		atomic_set(&priv->fw_reloading, 0);
+++		return false;
+++	}
+++
+++	priv->fw_stuck_cnt = 0;
+++	priv->fw_healthy_since = 0;
+++	queue_work(system_unbound_wq, &priv->fw_reload_work);
+++	return true;
+++}
+++
+++static void aqr107_fw_reload_work(struct work_struct *work)
+++{
+++	struct aqr107_priv *priv = container_of(work, struct aqr107_priv,
+++						fw_reload_work);
+++	struct phy_device *phydev = priv->phydev;
+++	bool should_reload = false, trigger = false;
+++	u8 attempt;
+++	int fw_id, hb, ret;
+++
+++	mutex_lock(&phydev->lock);
+++	if (atomic_read(&priv->fw_reload_abort) || !phydev->attached_dev ||
+++	    !phy_is_started(phydev) || phydev->suspended ||
+++	    priv->fw_reload_disabled) {
+++		atomic_set(&priv->fw_reloading, 0);
+++		mutex_unlock(&phydev->lock);
+++		return;
+++	}
+++
+++	fw_id = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_FW_ID);
+++	if (fw_id == 0) {
+++		should_reload = true;
+++	} else if (fw_id > 0 && priv->fw_hb_seen) {
+++		hb = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+++				  VEND1_GLOBAL_RSVD_STAT2);
+++		if (hb >= 0 && (u16)hb == priv->last_fw_heartbeat)
+++			should_reload = true;
+++	}
+++
+++	if (!should_reload) {
+++		priv->fw_stuck_cnt = 0;
+++		atomic_set(&priv->fw_reloading, 0);
+++		mutex_unlock(&phydev->lock);
+++		return;
+++	}
+++
+++	priv->last_reload_jiffies = jiffies ? jiffies : 1;
+++	priv->fw_hb_seen = false;
+++	priv->fw_healthy_since = 0;
+++	phydev->link = 0;
+++	attempt = priv->fw_reload_fails < U8_MAX ? priv->fw_reload_fails + 1 : U8_MAX;
+++	mutex_unlock(&phydev->lock);
+++
+++	phydev_warn(phydev,
+++		    "AQR firmware lost or stalled; reloading (attempt %u/%u)\n",
+++		    attempt, AQR_FW_RELOAD_MAX_FAILS);
+++
+++	ret = aqr_firmware_reload(phydev);
+++	if (!ret && !atomic_read(&priv->fw_reload_abort))
+++		ret = aqr_wait_reset_complete(phydev);
+++	if (!ret && !atomic_read(&priv->fw_reload_abort))
+++		ret = aqr_wait_fw_provisioning(phydev);
+++
+++	mutex_lock(&phydev->lock);
+++	if (ret == -ECANCELED || atomic_read(&priv->fw_reload_abort) ||
+++	    !phydev->attached_dev || !phy_is_started(phydev) ||
+++	    phydev->suspended) {
+++		priv->last_reload_jiffies = jiffies ? jiffies : 1;
+++		atomic_set(&priv->fw_reloading, 0);
+++		mutex_unlock(&phydev->lock);
+++		return;
+++	}
+++
+++	if (!ret)
+++		ret = phydev->drv && phydev->drv->config_init ?
+++		      phydev->drv->config_init(phydev) :
+++		      aqr107_config_init(phydev);
+++	if (!ret && phydev->interrupts == PHY_INTERRUPT_ENABLED)
+++		ret = aqr_config_intr(phydev);
+++	if (!ret)
+++		ret = (phydev->drv && phydev->drv->config_aneg == aqr_config_aneg_set_prot) ?
+++		      __aqr_config_aneg_set_prot(phydev) :
+++		      __aqr_config_aneg(phydev);
+++	if (!ret && phydev->autoneg == AUTONEG_ENABLE)
+++		ret = genphy_c45_restart_aneg(phydev);
+++
+++	priv->last_reload_jiffies = jiffies ? jiffies : 1;
+++	if (priv->fw_reload_fails < U8_MAX)
+++		priv->fw_reload_fails++;
+++
+++	if (ret) {
+++		phydev_err(phydev,
+++			   "AQR firmware reload failed (%d) (attempt %u/%u)\n",
+++			   ret, priv->fw_reload_fails, AQR_FW_RELOAD_MAX_FAILS);
+++		if (priv->fw_reload_fails >= AQR_FW_RELOAD_MAX_FAILS) {
+++			priv->fw_reload_disabled = true;
+++			phydev_err(phydev,
+++				   "AQR firmware reload cap reached; disabling automatic retries until interface restart\n");
+++		}
+++	} else {
+++		hb = phy_read_mmd(phydev, MDIO_MMD_VEND1,
+++				  VEND1_GLOBAL_RSVD_STAT2);
+++		if (hb >= 0) {
+++			priv->last_fw_heartbeat = (u16)hb;
+++			if (hb != 0 && hb != 0xffff)
+++				priv->fw_hb_seen = true;
+++		}
+++		priv->fw_stuck_cnt = 0;
+++		priv->fw_healthy_since = jiffies ? jiffies : 1;
+++		phydev->link = 0;
+++		trigger = true;
+++		phydev_info(phydev, "AQR firmware reloaded successfully\n");
+++	}
+++
+++	atomic_set(&priv->fw_reloading, 0);
+++	mutex_unlock(&phydev->lock);
+++
+++	if (trigger)
+++		phy_trigger_machine(phydev);
+++}
+++
+++/* Returns true if an asynchronous firmware reload is active or queued */
+++static bool aqr107_check_fw_health(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++	unsigned long backoff;
+++	int fw_id, hb;
+++
+++	if (!priv || !priv->fw_loaded || priv->fw_reload_disabled ||
+++	    atomic_read(&priv->fw_reload_abort))
+++		return false;
+++
+++	if (atomic_read(&priv->fw_reloading))
+++		return true;
+++
+++	fw_id = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_FW_ID);
+++	if (fw_id < 0)
+++		return false;
+++
+++	hb = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_RSVD_STAT2);
+++	if (hb < 0)
+++		return false;
+++
+++	if (fw_id > 0 && (!priv->fw_hb_seen || (u16)hb != priv->last_fw_heartbeat)) {
+++		priv->last_fw_heartbeat = (u16)hb;
+++		priv->fw_stuck_cnt = 0;
+++		if (hb != 0 && hb != 0xffff)
+++			priv->fw_hb_seen = true;
+++		if (priv->fw_reload_fails) {
+++			if (!priv->fw_healthy_since)
+++				priv->fw_healthy_since = jiffies ? jiffies : 1;
+++			else if (time_after_eq(jiffies,
+++					       priv->fw_healthy_since +
+++					       AQR_FW_HEALTHY_RESET_S * HZ)) {
+++				priv->fw_reload_fails = 0;
+++				priv->fw_healthy_since = 0;
+++			}
+++		}
+++		return false;
+++	}
+++
+++	if (fw_id == 0 || priv->fw_stuck_cnt >= 2)
+++		priv->fw_healthy_since = 0;
+++
+++	backoff = aqr107_reload_backoff_jiffies(priv->fw_reload_fails);
+++	if (backoff && priv->last_reload_jiffies &&
+++	    time_before(jiffies, priv->last_reload_jiffies + backoff))
+++		return false;
+++
+++	if (fw_id == 0) {
+++		if (++priv->fw_stuck_cnt < 2)
+++			return false;
+++	} else if (priv->fw_hb_seen && (u16)hb == priv->last_fw_heartbeat) {
+++		if (++priv->fw_stuck_cnt < 6)
+++			return false;
+++	} else {
+++		return false;
+++	}
+++
+++	return aqr107_schedule_fw_reload(phydev);
+++}
+++
++ static int aqr107_read_status(struct phy_device *phydev)
++ {
++ 	int val, ret;
++ 
+++	if (aqr107_check_fw_health(phydev)) {
+++		phydev->link = 0;
+++		return 0;
+++	}
+++
++ 	ret = aqr_read_status(phydev);
++ 	if (ret)
++ 		return ret;
++@@ -552,6 +806,11 @@
++ static int aqr107_get_tunable(struct phy_device *phydev,
++ 			      struct ethtool_tunable *tuna, void *data)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return -EBUSY;
+++
++ 	switch (tuna->id) {
++ 	case ETHTOOL_PHY_DOWNSHIFT:
++ 		return aqr107_get_downshift(phydev, data);
++@@ -563,6 +822,11 @@
++ static int aqr107_set_tunable(struct phy_device *phydev,
++ 			      struct ethtool_tunable *tuna, const void *data)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (priv && atomic_read(&priv->fw_reloading))
+++		return -EBUSY;
+++
++ 	switch (tuna->id) {
++ 	case ETHTOOL_PHY_DOWNSHIFT:
++ 		return aqr107_set_downshift(phydev, *(const u8 *)data);
++@@ -647,8 +911,7 @@
++ static int aqr107_config_init(struct phy_device *phydev)
++ {
++ 	struct aqr107_priv *priv = phydev->priv;
++-	u32 led_idx;
++-	int ret;
+++	int ret, hb;
++ 
++ 	/* Check that the PHY interface type is compatible */
++ 	if (phydev->interface != PHY_INTERFACE_MODE_SGMII &&
++@@ -681,24 +944,24 @@
++ 	if (ret)
++ 		return ret;
++ 
++-	/* Restore LED polarity state after reset */
++-	for_each_set_bit(led_idx, &priv->leds_active_low, AQR_MAX_LEDS) {
++-		ret = aqr_phy_led_active_low_set(phydev, led_idx, true);
++-		if (ret)
++-			return ret;
++-	}
++-
++-	for_each_set_bit(led_idx, &priv->leds_active_high, AQR_MAX_LEDS) {
++-		ret = aqr_phy_led_active_low_set(phydev, led_idx, false);
++-		if (ret)
++-			return ret;
++-	}
+++	/* Restore LED polarity and hardware-control rules after reset */
+++	ret = aqr_phy_led_restore(phydev);
+++	if (ret)
+++		return ret;
++ 
++ 	/* Enable USXGMII Clause 37 auto-negotiation on PHYXS if in USXGMII mode */
++ 	ret = aqr_enable_usxgmii_autoneg(phydev);
++ 	if (ret)
++ 		return ret;
++ 
+++	hb = phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_RSVD_STAT2);
+++	if (hb >= 0 && priv) {
+++		priv->last_fw_heartbeat = (u16)hb;
+++		priv->fw_stuck_cnt = 0;
+++		if (hb != 0 && hb != 0xffff)
+++			priv->fw_hb_seen = true;
+++	}
+++
++ 	return 0;
++ }
++ 
++@@ -799,8 +1062,16 @@
++ 
++ static int aqr107_suspend(struct phy_device *phydev)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
++ 	int err;
++ 
+++	if (priv) {
+++		atomic_set(&priv->fw_reload_abort, 1);
+++		smp_mb();
+++		cancel_work_sync(&priv->fw_reload_work);
+++		atomic_set(&priv->fw_reloading, 0);
+++	}
+++
++ 	err = phy_set_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
++ 			       MDIO_CTRL1_LPOWER);
++ 	if (err)
++@@ -811,17 +1082,42 @@
++ 
++ static int aqr107_resume(struct phy_device *phydev)
++ {
+++	struct aqr107_priv *priv = phydev->priv;
++ 	int err;
++ 
+++	if (priv) {
+++		atomic_set(&priv->fw_reload_abort, 0);
+++		priv->fw_reload_fails = 0;
+++		priv->fw_reload_disabled = false;
+++		priv->fw_stuck_cnt = 0;
+++		priv->fw_hb_seen = false;
+++		priv->fw_healthy_since = 0;
+++		priv->last_reload_jiffies = 0;
+++	}
+++
++ 	err = phy_clear_bits_mmd(phydev, MDIO_MMD_VEND1, MDIO_CTRL1,
++ 				 MDIO_CTRL1_LPOWER);
++ 	if (err)
++ 		return err;
++ 
+++	err = aqr107_wait_processor_intensive_op(phydev);
+++	if (err && err != -ETIMEDOUT)
+++		return err;
+++
+++	if (priv && priv->fw_loaded &&
+++	    phy_read_mmd(phydev, MDIO_MMD_VEND1, VEND1_GLOBAL_FW_ID) == 0) {
+++		aqr107_schedule_fw_reload(phydev);
+++		return 0;
+++	}
+++
++ 	err = aqr_wait_fw_provisioning(phydev);
++ 	if (err)
++ 		return err;
++ 
+++	err = aqr_phy_led_restore(phydev);
+++	if (err)
+++		return err;
+++
++ 	return aqr_enable_usxgmii_autoneg(phydev);
++ }
++ 
++@@ -954,13 +1250,17 @@
++ 
++ static int aqr107_probe(struct phy_device *phydev)
++ {
+++	struct aqr107_priv *priv;
++ 	int ret;
++ 
++-	phydev->priv = devm_kzalloc(&phydev->mdio.dev,
++-				    sizeof(struct aqr107_priv), GFP_KERNEL);
++-	if (!phydev->priv)
+++	priv = devm_kzalloc(&phydev->mdio.dev, sizeof(*priv), GFP_KERNEL);
+++	if (!priv)
++ 		return -ENOMEM;
++ 
+++	priv->phydev = phydev;
+++	INIT_WORK(&priv->fw_reload_work, aqr107_fw_reload_work);
+++	phydev->priv = priv;
+++
++ 	ret = aqr_firmware_load(phydev);
++ 	if (ret)
++ 		return ret;
++@@ -968,6 +1268,19 @@
++ 	return aqr_hwmon_probe(phydev);
++ }
++ 
+++static void aqr107_remove(struct phy_device *phydev)
+++{
+++	struct aqr107_priv *priv = phydev->priv;
+++
+++	if (!priv)
+++		return;
+++
+++	atomic_set(&priv->fw_reload_abort, 1);
+++	smp_mb();
+++	cancel_work_sync(&priv->fw_reload_work);
+++	atomic_set(&priv->fw_reloading, 0);
+++}
+++
++ 
++ static struct phy_driver aqr_driver[] = {
++ {
++@@ -1008,6 +1321,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR107),
++ 	.name		= "Aquantia AQR107",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init	= aqr107_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1032,6 +1346,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQCS109),
++ 	.name		= "Aquantia AQCS109",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init	= aqcs109_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1057,6 +1372,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR111),
++ 	.name		= "Aquantia AQR111",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init	= aqr107_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1082,6 +1398,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR111B0),
++ 	.name		= "Aquantia AQR111B0",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init	= aqr107_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1115,6 +1432,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR112),
++ 	.name		= "Aquantia AQR112",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.config_aneg    = aqr_config_aneg_set_prot,
++ 	.config_intr	= aqr_config_intr,
++ 	.handle_interrupt = aqr_handle_interrupt,
++@@ -1138,6 +1456,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR412),
++ 	.name		= "Aquantia AQR412",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.config_aneg    = aqr_config_aneg_set_prot,
++ 	.config_intr	= aqr_config_intr,
++ 	.handle_interrupt = aqr_handle_interrupt,
++@@ -1156,6 +1475,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR113),
++ 	.name		= "Aquantia AQR113",
++ 	.probe          = aqr107_probe,
+++	.remove          = aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init    = aqr113c_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1180,6 +1500,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR113C),
++ 	.name           = "Aquantia AQR113C",
++ 	.probe          = aqr107_probe,
+++	.remove          = aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init    = aqr113c_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1204,6 +1525,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR114C),
++ 	.name           = "Aquantia AQR114C",
++ 	.probe          = aqr107_probe,
+++	.remove          = aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init    = aqr107_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1229,6 +1551,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR115C),
++ 	.name           = "Aquantia AQR115C",
++ 	.probe          = aqr107_probe,
+++	.remove          = aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init    = aqr113c_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1254,6 +1577,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR813),
++ 	.name		= "Aquantia AQR813",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.get_rate_matching = aqr107_get_rate_matching,
++ 	.config_init	= aqr107_config_init,
++ 	.config_aneg    = aqr_config_aneg,
++@@ -1278,6 +1602,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR112C),
++ 	.name		= "Aquantia AQR112C",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.config_aneg	= aqr_config_aneg_set_prot,
++ 	.config_intr	= aqr_config_intr,
++ 	.handle_interrupt = aqr_handle_interrupt,
++@@ -1290,6 +1615,7 @@
++ 	PHY_ID_MATCH_MODEL(PHY_ID_AQR112R),
++ 	.name		= "Aquantia AQR112R",
++ 	.probe		= aqr107_probe,
+++	.remove		= aqr107_remove,
++ 	.config_aneg	= aqr_config_aneg_set_prot,
++ 	.config_intr	= aqr_config_intr,
++ 	.handle_interrupt = aqr_handle_interrupt,

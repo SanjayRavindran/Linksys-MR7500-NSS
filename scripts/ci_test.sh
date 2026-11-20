@@ -177,9 +177,37 @@ else
     log_fail "T3f-Patch0006" "Patch 0006 not found at $PATCH_0006"
 fi
 
+# 3g. Patch 0007 AQR114C FW Watchdog & LED Stretch
+echo "[*] Running Test 3g: Patch 0007 AQR114C FW Watchdog & LED Stretch..."
+PATCH_0007="$REPO_ROOT/patches/0007-qualcommax-mr7500-aqr114c-fw-watchdog-and-led-stretch.patch"
+if [ -f "$PATCH_0007" ]; then
+    REQUIRED_P7=(
+        "0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch"
+        "aqr_firmware_reload"
+        "VEND1_GLOBAL_RSVD_STAT2"
+        "VEND1_GLOBAL_LED_PROV_ACT_STRETCH_100MS"
+        "aqr_phy_led_restore"
+        "aqr107_fw_reload_work"
+        "aqr107_remove"
+        "cond_resched"
+        "AQR_FW_RELOAD_MAX_FAILS"
+        "fw_reload_abort"
+    )
+    MISSING_P7=0
+    for s in "${REQUIRED_P7[@]}"; do
+        if ! grep -qF -- "$s" "$PATCH_0007"; then
+            log_fail "T3g-Patch0007" "Missing expected fix in Patch 0007: $s"
+            MISSING_P7=$((MISSING_P7 + 1))
+        fi
+    done
+    [ "$MISSING_P7" -eq 0 ] && log_pass "T3g-Patch0007" "Patch 0007 adds AQR114C FW watchdog reload and LED blink stretch"
+else
+    log_fail "T3g-Patch0007" "Patch 0007 not found at $PATCH_0007"
+fi
+
 # 3d. AQR114C DTS NVMEM Downgrade Guard
 echo "[*] Running Test 3d: AQR114C DTS NVMEM Guard..."
-if grep -rnE "^\+.*aqr_fw" "$REPO_ROOT"/patches/*.patch 2>/dev/null; then
+if grep -rnE "^\+.*\baqr_fw\b" "$REPO_ROOT"/patches/*.patch 2>/dev/null; then
     log_fail "T3d-AQRGuard" "A patch re-adds aqr_fw NVMEM cell (risks v5.4.B downgrade or CRC failure)"
 else
     log_pass "T3d-AQRGuard" "No patch adds aqr_fw NVMEM cell; AQR114C loads v5.6.5 from filesystem cleanly"

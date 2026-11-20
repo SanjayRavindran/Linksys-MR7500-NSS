@@ -95,7 +95,8 @@ flowchart LR
     P3 --> P4["Patch 0004: qca-nss-pbuf nss_offload=0 Bypass + SSDK IPGT=0x70 (002) + bt_reset_hog + Drop nss_macsec0"]
     P4 --> P5["Patch 0005: AQR114C FW Provisioning Wait + USXGMII C37 AN Re-Arm on Boot/Resume/Hotplug"]
     P5 --> P6["Patch 0006: ath11k_ahb ce_irq_lock Spinlock (990) + mr7500-irq-tune AHB CE CPU 1 Pinning"]
-    P6 --> OV["Rootfs Overlays: 99-mr7500-nss-defaults + mr7500-irq-tune + mr7500-persist-log + mr7500-log-watch"]
+    P6 --> P7["Patch 0007: AQR114C Async FW Watchdog (0986) + 100ms LED Blink Stretch + Overload Guards"]
+    P7 --> OV["Rootfs Overlays: 99-mr7500-nss-defaults + mr7500-irq-tune + mr7500-persist-log + mr7500-log-watch"]
 ```
 
 ---
@@ -154,3 +155,42 @@ flowchart TD
    * Never run `sysupgrade -n` on a configured Switch+AP node unless intentionally wiping configuration; always run `sysupgrade -T /tmp/fw.bin` first.
 8. **Infrastructure Migration (2026-11-17):**
    * The `.87` Ubuntu build VM was archived (`vm_archive_87/`) and retired. All source code, Git history (`Linksys-MR7500-NSS/`), Nov 15 dual-profile builds (`bin/router-mode/`, `bin/switch-ap-mode/`), triple-read MTD backups (`backups/pass1..3`), REA outputs (`rea_mr7500_out/`), and VM SSH keys (`.ssh/id_ed25519`) now live in the Windows workspace. Future builds run via GitHub Actions (`.github/workflows/build-monthly-snapshot.yml`) or any Ubuntu 24.04/26.04 host running `scripts/build.sh`.
+
+
+---
+
+## 6. AQR114C Async Firmware Watchdog & Lock-Safety Architecture (`Patch 0007`)
+
+```mermaid
+flowchart TD
+    POLL["aqr107_read_status (1 Hz phylib poll) or aqr107_resume"] --> CHK{"FW_ID == 0 (2x) OR 30:0xc886 frozen (6x)?"}
+    CHK -- No --> RST60{"Healthy >= 60s?"}
+    RST60 -- Yes --> ZFAIL["Reset fw_reload_fails = 0"]
+    CHK -- Yes --> BCK{"Backoff 30s..300s elapsed AND fails < 5?"}
+    BCK -- No --> RET0["Keep link = 0, return 0 (never trigger PHY_ERROR)"]
+    BCK -- Yes --> QUEUE["Set fw_reloading = 1; queue_work on system_unbound_wq"]
+    QUEUE --> P1["Phase 1 (phydev->lock): re-check started, !suspended, !abort, FW lost"]
+    P1 --> P2["Phase 2 (UNLOCKED ~29s): 30:0x2680=1 + MDIO FW upload with cond_resched + abort check / 256 words"]
+    P2 --> P3["Phase 3 (phydev->lock): config_init + aqr_phy_led_restore (0xc06f) + __aqr_config_aneg + restart AN"]
+    P3 --> TRIG["Clear fw_reloading = 0, unlock, phy_trigger_machine"]
+    SUSP["aqr107_suspend or aqr107_remove (outside phydev->lock)"] --> ABORT["Set fw_reload_abort = 1; cancel_work_sync"]
+```
+
+---
+
+## 7. 2026-11-20 / 2026-11-21 Experience Log (Hotplug Recovery, Hardening, & Dual-Slot Flash)
+
+1. **Multi-Host Lab Topology (`2026-11-20` onward):**
+   * `192.168.1.95` (Windows Workstation): Primary repo reference, backups (`backups/pass1..3`), stock extract.
+   * `192.168.1.24` (`h61` Ubuntu): Primary OpenWrt build host (`~/mr7500/openwrt-ipq`), Git worktree (`~/Linksys-MR7500-NSS`), and FT232R USB-UART console host (`/dev/ttyUSB1` @ `115200 8N1`). Note: unplugging/replugging FT232R can increment device node from `/dev/ttyUSB0` to `/dev/ttyUSB1` if a stale reader holds `/dev/ttyUSB0`.
+   * `192.168.1.15` (`ubuntu-gpu-docker`): GitHub push host authenticated via `gh` HTTPS PAT (`SanjayRavindran/Linksys-MR7500-NSS`).
+   * `192.168.1.91` (`MR7500` Switch+AP): Live router bridged across `lan1..lan4` + `wan` + `phy0/1/2-ap0`.
+2. **UART & Live MDIO Diagnostics Rules:**
+   * Clause 45 `phytool` syntax on `dp5-syn` requires explicit `<dev>:<mmd>/<reg>`: `phytool read wan/8:0x1e/0x0020` (`wan/4/...` hits QCA8075 Clause 22 PHY 4).
+   * `nss_dp_netdev_ops.ndo_eth_ioctl` is `phy_do_ioctl_running`, so live MDIO `SIOCSMIIREG` recovery requires keeping `wan` UP (`ip link set wan up`) even when carrier is `0`.
+   * On IPQ6018 BLSP UART (`115200`), sending large (>128 byte) single bursts can overrun the RX FIFO; pace automated serial writes in `<= 48-64` byte chunks, and never send `
+` while U-Boot counts down `"Hit any key to stop autoboot"`.
+3. **AQR114C Empirical Observations (`v5.6.5 Cybertan Divo`):**
+   * Firmware heartbeat `30:0xc886` ticks monotonically at **1 Hz** both when linked (`2500Mb/s`) and when physically **unplugged** (`carrier=0`).
+   * Thermal register `30:0xc830` (`VEND1_GENERAL_STAT1`) showed `BIT(14)` (`0x5000`) at ~64.5â€“70.2Â°C (`hwmon7`) and cleared to `0x1000` at 66.6Â°C (`30:0xc420 == 0`); never gate reloads on thermal alarm bits.
+   * Both slots flashed cleanly without `-n` (`boot_part=2 -> 1 -> 2` via HTTP `192.168.1.24:18080` + SHA-256 + `sysupgrade -T`), preserving Switch+AP config and yielding identical live `aquantia.ko` (`79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`) from `switch-ap-mode` `sysupgrade.bin` (`0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`).

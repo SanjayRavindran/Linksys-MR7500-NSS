@@ -16,6 +16,13 @@ This document compiles all major engineering challenges, bugs, timing races, and
 8. [Issue 8: USB 3.0 VBUS Power Regulator & Missing Filesystem Modules](#issue-8-usb-30-vbus-power-regulator--missing-filesystem-modules)
 9. [Issue 9: CSR8811 Bluetooth Subsystem Power Management & RF Co-existence](#issue-9-csr8811-bluetooth-subsystem-power-management--rf-co-existence)
 10. [Issue 10: Dual A/B Slot Flash Integrity & Safe Sysupgrade Protocol](#issue-10-dual-ab-slot-flash-integrity--safe-sysupgrade-protocol)
+11. [Issue 11: AQR114C Slow Probe vs `phy_attach_direct()` Boot Race (`PHY_READY` Freeze & Null `dev_name` Oops)](#issue-11-aqr114c-slow-probe-vs-phy_attach_direct-boot-race-phy_ready-freeze--null-dev_name-oops)
+12. [Issue 12: 5G WAN LED Offload Blocking & Switch+AP `uci-defaults` Sysupgrade Clobber](#issue-12-5g-wan-led-offload-blocking--switchap-uci-defaults-sysupgrade-clobber)
+13. [Issue 13: `qca-nss-pbuf` Early Exit With `ath11k nss_offload=0`, CPU 0 IRQ Saturation, & SSDK GMAC `IPGT`](#issue-13-qca-nss-pbuf-early-exit-with-ath11k-nss_offload0-cpu-0-irq-saturation--ssdk-gmac-ipgt)
+14. [Issue 14: Dead `&nss_macsec0`, Unused CSR8811 `blsp1_uart2`, & AQR114C DTS NVMEM Downgrade Guard](#issue-14-dead-nss_macsec0-unused-csr8811-blsp1_uart2--aqr114c-dts-nvmem-downgrade-guard)
+15. [Issue 15: Aquantia AQR114C 5GbE Port Link Failure on Boot & Hotplug (`USXGMII` C37 AN Drop)](#issue-15-aquantia-aqr114c-5gbe-port-link-failure-on-boot--hotplug-usxgmii-c37-an-drop)
+16. [Issue 16: `ath11k_ahb` Copy Engine `ce3` Edge-IRQ Freeze (`-105`/`-ENOBUFS` WMI Timeout & `D`-State Hang)](#issue-16-ath11k_ahb-copy-engine-ce3-edge-irq-freeze--105-enobufs-wmi-timeout--d-state-hang)
+17. [Issue 17: Aquantia AQR114C Volatile Firmware Loss on Hotplug & Zero LED Blink Stretch (`Patch 0007`)](#issue-17-aquantia-aqr114c-volatile-firmware-loss-on-hotplug--zero-led-blink-stretch-patch-0007)
 
 ---
 
@@ -219,3 +226,37 @@ This document compiles all major engineering challenges, bugs, timing races, and
   1. Added dedicated `spinlock_t ce_irq_lock;` in `struct ath11k_ahb` (`ahb.h`), initialized in `ath11k_ahb_probe()`, and serialized all CE IE RMWs in `ahb.c` (`ath11k_ahb_ce_irq_set()` / `ath11k_ahb_modbit32()`) under `spin_lock_irqsave`/`spin_unlock_irqrestore`. (Avoids `ab->base_lock`, which uses `_bh` locks and would deadlock inside hard IRQ context.)
   2. Updated `files/etc/init.d/mr7500-irq-tune` to pin `GIC-0 ce[0-9]` IRQs onto CPU 1 (`smp_affinity=2`) while still spreading high-rate `QCN9074` PCIe MSIs and DP IRQs across CPUs 1–3.
   3. Added `files/etc/init.d/mr7500-persist-log` and `files/usr/sbin/mr7500-log-watch` (at `/etc/init.d/mr7500-persist-log` & `/usr/sbin/mr7500-log-watch`) for unbuffered 3-boot rotating persistent logs + crash/hang snapshots (`/root/boot-logs/`).
+
+---
+
+### Issue 17: Aquantia AQR114C Volatile Firmware Loss on Hotplug & Zero LED Blink Stretch (`Patch 0007`)
+
+* **Severity:** **CRITICAL** (Permanent 5GbE Port Outage Until Reboot After Hotplug/Transients + Non-Blinking Activity LEDs).
+* **Symptom:**
+  1. After passing traffic (`~3.5 GB`) or unplugging/replugging the 5GbE cable on `wan`, `wan` went permanently `carrier=0` (`Link is down`) while LAN ports kept working; reboots or interface restarts could not recover link once the internal PHY firmware exited unless cold-restarted.
+  2. Even while linked and passing gigabits of traffic, `wan` port LEDs (`90000.mdio-1:08:orange:wan` / `green:wan`) stayed solid and never blinked on TX/RX frames despite `ledtrig-netdev` reporting `offloaded=1`.
+* **Root Cause:**
+  1. **Volatile Flashless Firmware Loss:** Because AQR114C has no active SPI flash attached (`mtd9` OEM `v5.4.B` is intentionally bypassed via DT so Linux loads `/lib/firmware/marvell/AQR114C.cld` `v5.6.5` over MDIO), its IRAM (`0x40000000`) and DRAM (`0x3FFE0000`) firmware is **volatile**. On hotplug transients or internal resets, the ARC microprocessor falls back to boot-ROM/low-power state and Linux `aquantia_main.c` only loaded firmware once during initial `aqr107_probe()`. By contrast, Linksys stock firmware explicitly ran `/etc/init.d/service_wan/wan_AQR_monitor.sh` polling the 1 Hz firmware heartbeat `30:0xc886` (`VEND1_GLOBAL_RSVD_STAT2`) and triggering `30:0x2680=0x1` + MDIO reload.
+  2. **Inverted `ACT_STRETCH` Bitmask + Unrestored LED Rules:** In upstream Linux `6.12.92`, `drivers/net/phy/aquantia/aquantia.h` defined `VEND1_GLOBAL_LED_PROV_ACT_STRETCH GENMASK(0, 1)` (inverted bit order!) instead of `GENMASK(1, 0)`, and `aqr_phy_led_hw_control_set()` never programmed bits `[1:0]`. Because `AQR114C.cld` boots with `30:0xc430=0x0000`, `ledtrig-netdev` wrote `0xc06c` (`ACT_STRETCH=0` -> `0 ms` pulse stretch, invisible on 2.5G/5G links), whereas OEM/SSDK write `0xc0ef` (`ACT_STRETCH=0x3` -> `100 ms`). Any PHY firmware reset also wiped `30:0xc430..c43a`.
+* **Diagnostic Telemetry (Live Dead-ROM vs Live Healthy Signature):**
+  ```text
+  # Dead boot-ROM state on live router during 5GbE outage:
+  30:0x0020 (FW_ID)      = 0x0000   (healthy v5.6.5: 0x0506)
+  30:0x0000 (GLOBAL_SC)  = 0x8000   (healthy: 0x0000)
+  30:0xc001 (CONTROL2)   = 0x0020   (healthy: 0x0062)
+  30:0xc886 (HEARTBEAT)  = 0x0000   (healthy: increments 1 Hz both linked AND unplugged)
+  1:0 / 3:0 / 4:0 / 7:0  = 0xa040 / 0xa040 / 0xa040 / 0xb000
+  30:0xc430..c432        = 0x0003   (healthy TX/RX LED0: 0xc06f, Link LED1: 0xc060)
+  30:0xc438..c43a        = 0x0001
+  # Note on thermal register 30:0xc830: reads 0x5000 (BIT(14) set) at ~64.5-70.2C while
+  # 30:0xc420 == 0 (no shutdown); do NOT gate FW reload on 30:0xc830 BIT(14).
+  ```
+* **Live No-Reboot Recovery Verification:** Over UART, streaming `AQR114C.cld` via MDIO C45 ioctls (`SIOCGMIIREG`/`SIOCSMIIREG` with `wan` UP since `ndo_eth_ioctl` is `phy_do_ioctl_running`) using `30:0x2680=0x1`, mailbox `0x0200..0x0205`, restoring `4:0xc441=0x0008`, `30:0xc430=0xc0ef`, `30:0xc431=0xc0e0`, and restarting AN (`7:0x0000`) immediately recovered `2500Mb/s Full`, visible LED blinking, and internet reachability without rebooting.
+* **Permanent Hardened Kernel Fix (`patches/0007-qualcommax-mr7500-aqr114c-fw-watchdog-and-led-stretch.patch` -> `0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch`):**
+  1. **LED Blink Stretch & Restore (`aquantia.h`, `aquantia_leds.c`):** Fixed `VEND1_GLOBAL_LED_PROV_ACT_STRETCH` to `GENMASK(1, 0)`, enabled `VEND1_GLOBAL_LED_PROV_ACT_STRETCH_100MS` (`0x3`) when TX/RX offload is configured (producing `30:0xc430=0xc06f`), cached `led_hw_ctrl`/`led_rules[]`, and restored both polarity and HW rules via `aqr_phy_led_restore()` across `config_init()`, `resume()`, and firmware reload.
+  2. **Async Lock-Safe Watchdog (`system_unbound_wq`):** `aqr107_check_fw_health()` monitors `30:0x0020` (`FW_ID == 0` for 2 polls) and `30:0xc886` (frozen heartbeat for 6 polls) inside `aqr107_read_status()` and `aqr107_resume()`, queuing `aqr107_fw_reload_work()` on `system_unbound_wq`.
+  3. **Concurrency, Deadlock, & Overload Protections (v2 Hardening):**
+     * **Zero `rtnl_lock` / `phydev->lock` stall:** Phase 1 briefly locks `phydev->lock` to verify state (`phy_is_started`, `!suspended`, `!fw_reload_abort`), Phase 2 runs the ~29s MDIO upload **completely unlocked** (never holding `rtnl_lock` or `phydev->lock` against `ledtrig-netdev`'s `rtnl_lock -> trigger_data->lock -> phydev->lock`), and Phase 3 re-acquires `phydev->lock` to restore `config_init`/`config_intr`/`__aqr_config_aneg`/AN and calls `phy_trigger_machine()` after unlocking.
+     * **Callback Fencing & Clean Teardown:** `atomic_t fw_reloading` fences `config_aneg`, `handle_interrupt`, `get_stats`, `get/set_tunable`, `aqr_hwmon_read/write`, and `aqr_phy_led_*`. `aqr107_suspend()` and `aqr107_remove()` (wired on all 13 `aqr107_probe` `phy_driver` entries) set `fw_reload_abort = 1` and run `cancel_work_sync()` outside `phydev->lock`.
+     * **Scheduler / RCU / Bounded Retries:** `aqr_fw_load_memory()` checks all MDIO write/read errors immediately and calls `cond_resched()` + `fw_reload_abort` check every 256 words (safe on `CONFIG_PREEMPT_NONE=y`). `aqr107_read_status()` never returns `< 0` from reload errors (prevents permanent `phy_error_precise()` -> `PHY_HALTED` latch). Consecutive reloads apply exponential backoff (`30s -> 60s -> 120s -> 240s -> 300s`) and stop at `AQR_FW_RELOAD_MAX_FAILS` (`5`) until 60s of sustained ticking health or interface restart (`aqr107_resume()`).
+* **Dual-Slot Verification (2026-11-20 / 2026-11-21):** Verified live on both **Slot 1 (`boot_part=1`)** and **Slot 2 (`boot_part=2`)** with Switch+AP `sysupgrade.bin` (SHA-256 `0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`), confirming identical `/lib/modules/6.12.92/aquantia.ko` (`79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`), `2500Mb/s Full`, `4:0xc441=0x0008`, `30:0xc430=0xc06f`, blinking activity LEDs, and 1 Hz `30:0xc886` heartbeat both linked and unplugged.

@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    CI["scripts/ci_test.sh (20 Pre-Build Gates)"] --> PA["Upstream Patch-Apply Check (qosmio/openwrt-ipq @ 92a2d10)"]
+    CI["scripts/ci_test.sh (21 Pre-Build Gates)"] --> PA["Upstream Patch-Apply Check (qosmio/openwrt-ipq @ 92a2d10)"]
     PA --> ART["scripts/validate_build_artifacts.sh (15 Post-Build Gates / Profile)"]
     ART --> FL["Slot 1 & Slot 2 Flash (sysupgrade -T then sysupgrade)"]
     FL --> LIVE["tests/test_mr7500_validation.py (14 Live Hardware Gates) + LuCI /ubus + COM4"]
@@ -14,14 +14,14 @@ flowchart LR
 
 ## 2. Live Hardware 14-Point Regression Matrix (`tests/test_mr7500_validation.py`)
 
-Verified **14/14 PASSED (0 Warnings, 0 Failures)** on **both Slot 1 (`boot_part=1`) and Slot 2 (`boot_part=2`)** with Nov 15 Switch+AP builds (`ath11k_ahb.ko` SHA-256 `1b6d87c321fa18f64ee5e21e5c5e620c624061baae5309c29d6db3f2ef651815`):
+Verified **all hardware gates PASSED** on **both Slot 1 (`boot_part=1`) and Slot 2 (`boot_part=2`)** with the 2026-11-20 Switch+AP build (`sysupgrade.bin` SHA-256 `0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`, live `/lib/modules/6.12.92/aquantia.ko` SHA-256 `79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`), building upon the Nov 15 Wi-Fi/ath11k/LuCI regression baseline (`ath11k_ahb.ko` SHA-256 `1b6d87c321fa18f64ee5e21e5c5e620c624061baae5309c29d6db3f2ef651815`):
 
 | Test ID | Test Case | Verified Switch+AP Result |
 |---|---|---|
 | **TC-01** | Boot Slot & Dual-Partition Layout | Verified independently on **Slot 1 (`boot_part=1`)** and **Slot 2 (`boot_part=2`)**; alternate slot intact |
 | **TC-02** | Kernel Version & CPU Governor | Linux `6.12.92`, 4 Cortex-A53 cores @ `1800 MHz` (`performance`) |
 | **TC-03** | Qualcomm NSS Offload & pbuf/RPS | `qca-nss-drv`, `ecm`, `bridge-mgr` active (`extra_pbuf=3100672`, `high_water=30624`, `rps_bitmap=15`, `auto_scale=1`) |
-| **TC-04** | AQR114C 5GbE, USXGMII AN, Guard & LEDs | `2500 Mb/s Full` (`4:0xc441=0x0008`, `4:0xe812=0xb419`, `FW=0x0506 [fs_only]`, LEDs `offloaded=1/1`, active RX) |
+| **TC-04** | AQR114C 5GbE, USXGMII AN, Watchdog & Blink LEDs | `2500 Mb/s Full` (`4:0xc441=0x0008`, `4:0xe812=0xb419`, `FW=0x0506 [fs_only]`, `30:0xc430=0xc06f` 100ms stretch, `30:0xc886` advancing 1 Hz, LEDs `offloaded=1/1`, active RX) |
 | **TC-05** | Unified 5-Port Switch Fabric | `lan1`, `lan2`, `lan3`, `lan4`, `phy0-ap0`, `phy1-ap0`, `phy2-ap0`, `wan` bridged in `br-lan` |
 | **TC-06** | Management IP & Upstream Gateway | `192.168.1.91/24` (backup IP absent); outbound ping `1.1.1.1` 0% loss |
 | **TC-07** | Local DHCP Disabled (AP Mode) | `dhcp.lan.ignore=1`, UDP/67 not listening (no rogue DHCP) |

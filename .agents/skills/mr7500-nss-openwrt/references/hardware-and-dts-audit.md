@@ -17,9 +17,9 @@
 | `mtd10` | `0x00080000` (512 KiB) | **`u_env`** | Active U-Boot env (`boot_part=1` or `2`, `boot_part_ready=3`) |
 | `mtd11` | `0x00040000` (256 KiB) | **`s_env`** | Linksys boot state counter env |
 | `mtd12` | `0x00040000` (256 KiB) | **`devinfo`** | Factory serial, MACs (`hw_mac_addr`), certs (Backed up) |
-| `mtd13` | `0x05200000` (82 MiB) | `kernel` | **Slot 1 OpenWrt 6.12.92 + NSS 12.5 FIT Kernel (Nov 15 Switch+AP)** |
+| `mtd13` | `0x05200000` (82 MiB) | `kernel` | **Slot 1 OpenWrt 6.12.92 + NSS 12.5 FIT Kernel (Nov 20/21 Switch+AP + Patch 0007)** |
 | `mtd14` | `0x04a00000` (74 MiB) | `rootfs` | **Slot 1 OpenWrt SquashFS + UBIFS Overlay** |
-| `mtd15` | `0x05200000` (82 MiB) | `alt_kernel` | **Slot 2 OpenWrt 6.12.92 + NSS 12.5 FIT Kernel (Active Nov 15 Switch+AP)** |
+| `mtd15` | `0x05200000` (82 MiB) | `alt_kernel` | **Slot 2 OpenWrt 6.12.92 + NSS 12.5 FIT Kernel (Active Nov 20/21 Switch+AP + Patch 0007)** |
 | `mtd16` | `0x04a00000` (74 MiB) | `alt_rootfs` | **Slot 2 OpenWrt SquashFS + UBIFS Overlay** |
 | `mtd17` | `0x00400000` (4 MiB) | `sysdiag` | OEM diagnostics (Backed up) |
 | `mtd18` | `0x13d00000` (317 MiB) | `syscfg` | OEM persistent UBIFS config (Backed up in `pass2`/`pass3`) |
@@ -79,7 +79,9 @@ flowchart TB
    * Hardens `aquantia_main.c` (`aqr_wait_fw_provisioning()`, `aqr_enable_usxgmii_autoneg()`, `aqr107_wait_processor_intensive_op()`) across boot, `aqr107_resume()`, `aqr_config_aneg()`, and `aqr107_read_status()` (`4/0xc441=0x0008`).
 6. **`patches/0006-qualcommax-mr7500-serialize-ath11k-ahb-ce-irq.patch`**
    * Adds `990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch`: introduces `spinlock_t ce_irq_lock;` in `struct ath11k_ahb` and wraps `CE_HOST_IE_1/2/3` RMWs (`ath11k_ahb_ce_irq_set()`, `ath11k_ahb_modbit32()`) with `spin_lock_irqsave`/`spin_unlock_irqrestore`.
-7. **Overlay Services & Config (`files/` & `config/profiles/`):**
+7. **`patches/0007-qualcommax-mr7500-aqr114c-fw-watchdog-and-led-stretch.patch`**
+   * Adds `0986-net-phy-aquantia-fw-watchdog-and-led-stretch.patch`: fixes inverted `VEND1_GLOBAL_LED_PROV_ACT_STRETCH GENMASK(1, 0)` + enables 100 ms TX/RX blink stretch (`0x3`), caches/restores LED rules in `aqr_phy_led_restore()`, offloads `aqr_firmware_reload()` to `aqr107_fw_reload_work()` on `system_unbound_wq` monitoring `30:0x0020` & `30:0xc886`, fences concurrent callbacks with `fw_reloading`/`fw_reload_abort`, wires `aqr107_remove()`, adds `cond_resched()` + fast-fail MDIO checks, and bounds retries with exponential backoff (`30s..300s`) and `AQR_FW_RELOAD_MAX_FAILS = 5` (see [aqr114c-watchdog-and-recovery.md](./aqr114c-watchdog-and-recovery.md)).
+8. **Overlay Services & Config (`files/` & `config/profiles/`):**
    * `files/etc/uci-defaults/99-mr7500-nss-defaults`: Configures Router Mode defaults (`10.143.1.1/24` unless already applied or Switch+AP mode), `log_size='512'`, `ath11k nss_offload=0 frame_mode=0`, and enables `skb_recycler`, `qca-nss-ecm`, `qca-nss-drv`, `qca-nss-pbuf`, `mr7500-irq-tune`, `mr7500-persist-log`.
    * `files/etc/init.d/mr7500-irq-tune`: Pins `GIC-0 ce[0-9]` onto CPU 1 (`2`); spreads `nss_queue0..3`, `empty_buf_*`, DP IRQs, and QCN9074 PCIe MSIs off CPU 0.
    * `files/etc/init.d/mr7500-persist-log` + `files/usr/sbin/mr7500-log-watch`: Keeps full unbuffered `logread -f -l 9999 -t -F` (`boot-0..3.log`) + 30s health/D-state/dmesg crash snapshots (`boot-0..3.diag`) in `/root/boot-logs/`.

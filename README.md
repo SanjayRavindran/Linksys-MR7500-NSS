@@ -34,7 +34,7 @@ This repository provides full out-of-the-box **Qualcomm Network Subsystem (NSS) 
 
 - **Qualcomm NSS Hardware Offloading:** NSS Core 0 firmware (`NSS.FW.12.5-210-CP.R`) with dynamic frequency scaling (187.2 / 748.8 / 1497.6 MHz) and RPS distribution across all 4 Cortex-A53 cores.
 - **Wire-Speed Forwarding at Zero CPU Load:** 944+ Mbps NAT throughput with **99.95% host CPU idle** (0.03% softirq) accelerated via Qualcomm ECM + NSS.
-- **Multi-Gigabit 5GbE WAN Port (2.37 Gbps Verified):** Synopsys XGMAC + Marvell/Aquantia **AQR114C** PHY operating over USXGMII with Clause 37 in-band auto-negotiation (`0x0008`) and cold-boot probe timing patch (`0982`). Tested and verified peer-to-peer at **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
+- **Multi-Gigabit 5GbE WAN Port (2.37 Gbps Verified):** Synopsys XGMAC + Marvell/Aquantia **AQR114C** PHY operating over USXGMII with Clause 37 in-band auto-negotiation (`0x0008`), cold-boot probe timing patch (`0982`), async runtime firmware watchdog + 100 ms HW LED blink stretch (`0986` / Patch `0007`). Tested and verified peer-to-peer at **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
 - **Tri-Band Wi-Fi 6E (Out-of-the-Box):**
   - **2.4 GHz:** 2x2 802.11ax (HE40) via IPQ6018 internal radio (`QCN5022`, SSID `Linksys-MR7500-2.4G`, WPA2-PSK).
   - **5 GHz:** 2x2 802.11ax (HE80) via IPQ6018 internal radio (`QCN5052`, SSID `Linksys-MR7500-5G`, WPA2-PSK).
@@ -296,7 +296,7 @@ ssh root@10.143.1.1 "sh -s" < scripts/validate_firmware.sh
 * `TC-01`: Active Boot Slot 1 (`boot_part=1`) & Slot 2 OEM fallback intact.
 * `TC-02`: Linux 6.12 Quad-Core 1.8 GHz Performance Governor.
 * `TC-03`: Qualcomm NSS Ubi Core 0 driver & ECM acceleration engine.
-* `TC-04`: Marvell/Aquantia AQR114C 5GbE WAN & USXGMII Clause 37 auto-negotiation.
+* `TC-04`: Marvell/Aquantia AQR114C 5GbE WAN, USXGMII Clause 37 AN (`0x0008`), 100 ms LED blink stretch (`0xc430`), and 1 Hz FW heartbeat (`0xc886`).
 * `TC-05`: QCA8075 4-port Gigabit LAN switch fabric.
 * `TC-06`: WAN DHCP acquisition & outbound IPv4 internet routing.
 * `TC-07`: LAN DHCPv4 server (`10.143.1.1/24`), Option 3/6, & DNS resolver.
