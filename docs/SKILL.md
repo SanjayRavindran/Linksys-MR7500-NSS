@@ -2,7 +2,7 @@
 name: mr7500-nss-openwrt
 description: >-
   Comprehensive project runbook, hardware specification, stock firmware analysis,
-  DTS/kernel patch checklist (0001-0007), backup verification protocol, persistent
+  DTS/kernel patch checklist (0001-0008), backup verification protocol, persistent
   crash logging, AQR114C runtime watchdog recovery, and build/test workflow for
   OpenWrt + Qualcomm NSS on the Linksys MR7500 (Hydra Pro 6E, IPQ6018). Activate
   this skill whenever working on the Linksys MR7500 OpenWrt NSS codebase,
@@ -12,7 +12,7 @@ description: >-
 
 # Linksys MR7500 (Hydra Pro 6E) OpenWrt + NSS Porting Skill
 
-This skill documents the current hardware topology, active dual-slot firmware baseline, Device Tree and kernel patch stack (`0001`â€“`0007`), triple-read backup verification, 3-boot persistent crash logging, AQR114C runtime firmware watchdog recovery, session lessons learned, and test workflows for the **Linksys MR7500 v1 (codename `divo`)**.
+This skill documents the current hardware topology, active dual-slot firmware baseline, Device Tree and kernel patch stack (`0001`–`0008`), triple-read backup verification, 3-boot persistent crash logging, AQR114C runtime firmware watchdog recovery, session lessons learned, and test workflows for the **Linksys MR7500 v1 (codename `divo`)**.
 
 > [!CAUTION]
 > ### DISCLAIMER & LIMITATION OF LIABILITY
@@ -46,7 +46,7 @@ flowchart LR
 * **Windows Workstation (`192.168.1.95`):**
   * Holds project mirror, verified NAND backups (`backups/pass1..3/`, `source_of_truth/`, `critical_and_fallback_bundle.tar.gz`, `live_router_snapshot_20261117/`), stock blobs/extracts (`blobs/`, `stock_extract/`, `stock_nss_11_5_fallback/`), REA analysis (`rea_mr7500_out/`), and retired `.87` VM archive (`vm_archive_87/`).
 * **Live MR7500 Router (`192.168.1.91`, Switch + AP Mode):**
-  * **Active Dual Slots:** Both **Slot 1 (`boot_part=1`)** and **Slot 2 (`boot_part=2`, currently active)** run the verified **2026-11-20 OpenWrt `6.12.92` + NSS `12.5`** Switch+AP image (`switch-ap-mode` `sysupgrade.bin` SHA-256 `0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`, Patches `0001`â€“`0007`, `/lib/modules/6.12.92/aquantia.ko` SHA-256 `79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`).
+  * **Active Dual Slots:** Both **Slot 1 (`boot_part=1`)** and **Slot 2 (`boot_part=2`, currently active)** run the verified **2026-11-26 OpenWrt `6.12.92` + NSS `12.5`** Switch+AP image (`switch-ap-mode` `sysupgrade.bin` SHA-256 `f25e582a68b4eec9622735f7d830c07f720982b77a30d9138990bd6e67edf634`, identical `mtd13`/`mtd15` FIT kernel SHA-256 `c4a7d0f8b2e4e034ce832936978ea3be1ee6495bd5a8d4a2baf2fb05b5594395`, Patches `0001`–`0008`).
 
 ---
 
@@ -55,14 +55,14 @@ flowchart LR
 See [references/hardware-and-dts-audit.md](./hardware-and-dts-audit.md), [references/aqr114c-watchdog-and-recovery.md](../.agents/skills/mr7500-nss-openwrt/references/aqr114c-watchdog-and-recovery.md), and [Architecture & Experience Charts](./ARCHITECTURE_AND_EXPERIENCE_LOG.md).
 
 * **SoC / RAM / Flash:** Qualcomm IPQ6018 (4x ARM Cortex-A53 @ 1.8 GHz, `performance`), 512 MB DDR3L (`386,492 kB` Linux usable, `extra_pbuf_core0=3100672`), 512 MB Hynix `H27S4G8F2EDA-BC` SLC NAND (`erasesize=0x20000`, `0` bad PEBs).
-* **5GbE WAN Port (`dp5-syn` / `wan`):** Marvell/Aquantia `AQR114C-B0` (`MDIO 8`, C45 `USXGMII`), loads `/lib/firmware/marvell/AQR114C.cld` (`v5.6.5 Cybertan Divo`, SHA-256 `32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`). Links at **2500 Mb/s Full** (`4/0xc441=0x0008`, `4/0xe812=0xb419`) across cold boot and hotplug (Patches `0001`â€“`0005`, `0007`), HW LEDs `offloaded=1/1` with 100 ms blink stretch (`30:0xc430=0xc06f`, `30:0xc431=0xc060`), 1 Hz FW heartbeat `30:0xc886` active linked and unplugged, **2.32/2.37 Gbps** bidirectional TCP verified.
-* **Switch Fabric & Switch+AP Bridge:** QCA8075 (`lan1`..`lan4` over `QSGMII`, `IPGT=0x70`) + `wan` (`dp5-syn`) + `phy0-ap0`/`phy1-ap0`/`phy2-ap0` bridged in `br-lan` (`192.168.1.91/24`, DHCP disabled).
+* **5GbE WAN Port (`dp5-syn` / `wan`):** Marvell/Aquantia `AQR114C-B0` (`MDIO 8`, C45 `USXGMII`), loads `/lib/firmware/marvell/AQR114C.cld` (`v5.6.5 Cybertan Divo`, SHA-256 `32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`). Links at **2500 Mb/s Full** (`4/0xc441=0x0008`, `4/0xe812=0xb419`) across cold boot and hotplug (Patches `0001`–`0005`, `0007`), HW LEDs `offloaded=1/1` with 100 ms blink stretch (`30:0xc430=0xc06f`, `30:0xc431=0xc060`), 1 Hz FW heartbeat `30:0xc886` active linked and unplugged, **2.32/2.37 Gbps** bidirectional TCP verified.
+* **Switch Fabric & Switch+AP Bridge:** QCA8075 (`lan1`..`lan4` over `PSGMII` `MAC_MODE_PSGMII=0x00` per Patch `0008`, `IPGT=0x70`, `948.53 Mbps` L2 verified) + `wan` (`dp5-syn`) + `phy0-ap0`/`phy1-ap0`/`phy2-ap0` bridged in `br-lan` (`192.168.1.91/24`, DHCP disabled).
 * **Tri-Band Wi-Fi 6E:** `phy1` (`2.4G` `HE40` Ch 6), `phy0` (`5G` `HE80` Ch 36), `phy2` (`6G` `HE160` Ch 37 OWE); host path (`ath11k nss_offload=0 frame_mode=0`) + `ce_irq_lock` (Patch `0006`) + `GIC-0 ce[0-9]` CPU 1 affinity.
 * **Peripherals & Logs:** DWC3 xHCI USB 3.0 (`GPIO 25` VBUS), CSR8811 BLE held in reset (`GPIO 34`), 7x TSENS, `/dev/watchdog0`, and 3-boot persistent logger in `/root/boot-logs/` (`boot-0..3.log` + `.diag`).
 
 ---
 
-## 3. Patch Stack (`0001`â€“`0007`) & Rootfs Overlays
+## 3. Patch Stack (`0001`–`0008`) & Rootfs Overlays
 
 | Patch / Service | Summary |
 |---|---|
@@ -73,6 +73,7 @@ See [references/hardware-and-dts-audit.md](./hardware-and-dts-audit.md), [refere
 | `0005-qualcommax-mr7500-harden-aqr114c-usxgmii-hotplug.patch` | `aqr_wait_fw_provisioning()` + `aqr_enable_usxgmii_autoneg()` across boot, resume, `aneg`, and hotplug |
 | `0006-qualcommax-mr7500-serialize-ath11k-ahb-ce-irq.patch` | `990-wifi-ath11k-ahb-serialize-ce-irq-enable-disable.patch` (`ce_irq_lock` via `spin_lock_irqsave`) |
 | `0007-qualcommax-mr7500-aqr114c-fw-watchdog-and-led-stretch.patch` | `0986`: async `system_unbound_wq` AQR114C FW watchdog (`30:0x0020`/`0xc886`), 100 ms blink stretch (`GENMASK(1, 0)`), LED restore, `cond_resched()` + abort/backoff/5-fail cap |
+| `0008-qualcommax-mr7500-use-psgmii-for-qca8075.patch` | Sets `qcom,package-mode`, `dp1..dp4 phy-mode`, and `switch_mac_mode` to `PSGMII` (`0x00`, OpenWrt `#25746` `rx=0` fix) |
 | `files/etc/init.d/mr7500-irq-tune` | Pins `GIC-0 ce[0-9]` onto CPU 1 (`2`); spreads `nss_queue0..3`, `empty_buf_*`, DP/PCIe MSIs off CPU 0 |
 | `files/etc/init.d/mr7500-persist-log` + `mr7500-log-watch` | Unbuffered `logread -f -l 9999 -t -F` (`fsync` per line) + 30s health/D-state/dmesg crash watcher (3-boot rotation) |
 
@@ -80,7 +81,7 @@ See [references/hardware-and-dts-audit.md](./hardware-and-dts-audit.md), [refere
 
 ## 4. Verification & Test Commands
 
-See [references/test-cases.md](../.agents/skills/mr7500-nss-openwrt/references/test-cases.md) (`21/21` CI gates, `15/15` artifact gates, `14/14` live hardware regression tests).
+See [references/test-cases.md](../.agents/skills/mr7500-nss-openwrt/references/test-cases.md) (`22/22` CI gates, `15/15` artifact gates, `14/14` live hardware regression tests).
 
 * **Live Router 14-Point Suite:** `python tests/test_mr7500_validation.py --host 192.168.1.91 --user root`
 * **CI Pre-Build Suite:** `bash scripts/ci_test.sh`

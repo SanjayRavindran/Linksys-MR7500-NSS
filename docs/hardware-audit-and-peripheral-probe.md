@@ -37,7 +37,7 @@ A comprehensive hardware probe was conducted across the physical and logical int
 | **True RNG** | Qualcomm Hardware PRNG | `qcom,prng-ipq807x` | **ACTIVE** | Integrated into kernel entropy pool |
 | **Thermal Sensors** | Qualcomm TSENS (7 Zones) | `qcom,ipq6018-tsens` | **ACTIVE** | Zone 0..6 active: NSS 62.9°C, CPU 63.9°C, WCSS 62.9°C |
 | **Watchdog Timer** | Qualcomm KPSS Watchdog | `qcom,kpss-wdt-ipq6018` | **ACTIVE** | `/dev/watchdog` & `/dev/watchdog0` active |
-| **LAN Switch (1–4)** | Qualcomm QCA8075 PHYs 0..3 | `qca8075` over QSGMII | **ACTIVE** | Ports 1–4 linking at 1000M Full Duplex |
+| **LAN Switch (1–4)** | Qualcomm QCA8075 PHYs 0..3 | `qca8075` over **PSGMII** (`0x00`, Patch `0008`) | **ACTIVE** | Ports 1–4 linking at 1000M Full Duplex (`948.53 Mbps` L2 verified) |
 | **WAN Multi-Gig** | Marvell/Aquantia AQR114C-B0 | `aquantia` C45 over USXGMII | **ACTIVE** | **2500M Full Duplex**, **2.32–2.37 Gbps** TCP throughput |
 | **Wi-Fi 2.4 GHz** | IPQ6018 internal QCN5022 | `ath11k_ahb` (mac80211) | **ACTIVE** | 2x2 ax HE40 (`Linksys-MR7500-2.4G`), WPA2-PSK |
 | **Wi-Fi 5 GHz** | IPQ6018 internal QCN5052 | `ath11k_ahb` (mac80211) | **ACTIVE** | 2x2 ax HE80 (`Linksys-MR7500-5G`), WPA2-PSK |

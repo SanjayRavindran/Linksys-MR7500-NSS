@@ -4,6 +4,17 @@ The Linksys MR7500 (Hydra Pro 6E) features hardware-assisted dual-boot A/B firmw
 
 ---
 
+```mermaid
+flowchart TD
+    UB["U-Boot (auto_recovery = yes, boot_part_ready = 3)"] --> CHK{"boot_part == 1?"}
+    CHK -- Yes --> S1["Boot Slot 1: kernel (mtd13) + rootfs (mtd14)"]
+    CHK -- No --> S2["Boot Slot 2: alt_kernel (mtd15) + alt_rootfs (mtd16)"]
+    S1 --> FAIL1{"3x Watchdog / Failed Boot?"}
+    FAIL1 -- Yes --> S2
+    S2 --> FAIL2{"3x Watchdog / Failed Boot?"}
+    FAIL2 -- Yes --> S1
+```
+
 ## 1. NAND Flash Partition Layout
 
 | MTD Partition | NAND Offset | Size | Name | Purpose |

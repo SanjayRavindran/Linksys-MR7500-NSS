@@ -130,3 +130,18 @@ Address:  2404:6800:4007:836::200e
   * `phy1-ap0` (2.4 GHz): RX packets flowing, **0 dropped**, **0 errors**.
   * `phy2-ap0` (6 GHz): RX packets flowing, **0 dropped**, **0 errors**.
   * Qualcomm NSS ECM continues to accelerate all routed/NAT packets between `br-lan` and `wan` at wire speed.
+
+---
+
+## 6. Switch+AP Dual-Slot L2 Throughput & PSGMII Verification (`Patch 0008`)
+
+```mermaid
+flowchart LR
+    WIN["Workstation (192.168.1.83)"] <--> SW["2.5GbE Switch"]
+    SW <-- "wan (2500M USXGMII)" --> MR["MR7500 (192.168.1.91, PPE Hardware Switch)"]
+    MR <-- "lan3 (1000M PSGMII)" --> PI["Raspberry Pi 4B (192.168.1.45)"]
+```
+
+* **4-Stream TCP (`192.168.1.83 -> 192.168.1.45`):** **`943.46 Mbps`** (`1,180.96 MB` / `10.01s`).
+* **4-Stream TCP (`192.168.1.45 -> 192.168.1.83`):** **`948.53 Mbps`** (`1,186.03 MB` / `10.00s`).
+* **Latency & Errors:** IPv4 ping `10/10` `<1 ms`, IPv6 ping `5/5` `<1 ms`, Gateway `0.223 ms` avg; `0` RX/TX errors, `0` drops, `0` carrier flaps across `wan`, `lan3`, and Pi `eth0`; MR7500 load `0.00 0.03 0.02`.

@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    CI["scripts/ci_test.sh (21 Pre-Build Gates)"] --> PA["Upstream Patch-Apply Check (qosmio/openwrt-ipq @ 92a2d10)"]
+    CI["scripts/ci_test.sh (22 Pre-Build Gates)"] --> PA["Upstream Patch-Apply Check (qosmio/openwrt-ipq @ 92a2d10)"]
     PA --> ART["scripts/validate_build_artifacts.sh (15 Post-Build Gates / Profile)"]
     ART --> FL["Slot 1 & Slot 2 Flash (sysupgrade -T then sysupgrade)"]
     FL --> LIVE["tests/test_mr7500_validation.py (14 Live Hardware Gates) + LuCI /ubus + COM4"]
@@ -14,7 +14,7 @@ flowchart LR
 
 ## 2. Live Hardware 14-Point Regression Matrix (`tests/test_mr7500_validation.py`)
 
-Verified **all hardware gates PASSED** on **both Slot 1 (`boot_part=1`) and Slot 2 (`boot_part=2`)** with the 2026-11-20 Switch+AP build (`sysupgrade.bin` SHA-256 `0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`, live `/lib/modules/6.12.92/aquantia.ko` SHA-256 `79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`), building upon the Nov 15 Wi-Fi/ath11k/LuCI regression baseline (`ath11k_ahb.ko` SHA-256 `1b6d87c321fa18f64ee5e21e5c5e620c624061baae5309c29d6db3f2ef651815`):
+Verified **all hardware gates PASSED** on **both Slot 1 (`boot_part=1`) and Slot 2 (`boot_part=2`)** with the 2026-11-26 Switch+AP PSGMII build (`sysupgrade.bin` SHA-256 `f25e582a68b4eec9622735f7d830c07f720982b77a30d9138990bd6e67edf634`, identical `mtd13`/`mtd15` FIT SHA-256 `c4a7d0f8b2e4e034ce832936978ea3be1ee6495bd5a8d4a2baf2fb05b5594395`; building on Nov 20 `0740664d...` and live `/lib/modules/6.12.92/aquantia.ko` SHA-256 `79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`), building upon the Nov 15 Wi-Fi/ath11k/LuCI regression baseline (`ath11k_ahb.ko` SHA-256 `1b6d87c321fa18f64ee5e21e5c5e620c624061baae5309c29d6db3f2ef651815`):
 
 | Test ID | Test Case | Verified Switch+AP Result |
 |---|---|---|
@@ -22,7 +22,7 @@ Verified **all hardware gates PASSED** on **both Slot 1 (`boot_part=1`) and Slot
 | **TC-02** | Kernel Version & CPU Governor | Linux `6.12.92`, 4 Cortex-A53 cores @ `1800 MHz` (`performance`) |
 | **TC-03** | Qualcomm NSS Offload & pbuf/RPS | `qca-nss-drv`, `ecm`, `bridge-mgr` active (`extra_pbuf=3100672`, `high_water=30624`, `rps_bitmap=15`, `auto_scale=1`) |
 | **TC-04** | AQR114C 5GbE, USXGMII AN, Watchdog & Blink LEDs | `2500 Mb/s Full` (`4:0xc441=0x0008`, `4:0xe812=0xb419`, `FW=0x0506 [fs_only]`, `30:0xc430=0xc06f` 100ms stretch, `30:0xc886` advancing 1 Hz, LEDs `offloaded=1/1`, active RX) |
-| **TC-05** | Unified 5-Port Switch Fabric | `lan1`, `lan2`, `lan3`, `lan4`, `phy0-ap0`, `phy1-ap0`, `phy2-ap0`, `wan` bridged in `br-lan` |
+| **TC-05** | Unified 5-Port Switch Fabric & PSGMII | `lan1`–`lan4` (`psgmii`, `switch_mac_mode=00000000`), `wan`, `phy0/1/2-ap0` bridged in `br-lan`; `943.46 / 948.53 Mbps` (`wan <-> lan3` RPi 4B) verified |
 | **TC-06** | Management IP & Upstream Gateway | `192.168.1.91/24` (backup IP absent); outbound ping `1.1.1.1` 0% loss |
 | **TC-07** | Local DHCP Disabled (AP Mode) | `dhcp.lan.ignore=1`, UDP/67 not listening (no rogue DHCP) |
 | **TC-08** | DNS Resolution & IPv6 Reachability | External DNS resolution OK |
@@ -42,5 +42,5 @@ Verified **all hardware gates PASSED** on **both Slot 1 (`boot_part=1`) and Slot
 * **3-Boot Persistent Crash Logger (`mr7500-persist-log` & `mr7500-log-watch`):**
   * `/sbin/logd -S 512` + `/sbin/logread -f -l 9999 -t -F /root/boot-logs/boot-0.log -S 2048` + 30s health watcher writing `/root/boot-logs/boot-0.diag`.
   * Rotates `boot-0..3.{log,log.old,diag}` once per boot via `/tmp/mr7500-persist-log.booted`.
-* **CI Pre-Build Suite (`scripts/ci_test.sh`, `20/20 PASSED`):**
-  * Covers `T1-Syntax` (all `.sh`, `init.d/*`, `uci-defaults/*`, `usr/sbin/*`), `T2`–`T3f` (Patches `0001`–`0006`), `T3d-AQRGuard`, `T4-Security`, `T5-Mode`, `T6-Diffconfig`, `T7-BlobExtract`, `T8-Firewall`, `T9-OverlayInit`, `T9b-PersistLog`, `T10-DualProfile`, `T11-TFTPFlasher`, `T12-DocsAndLicenses`, `T13-NoTrackedBinaries`, `T14-PythonAndBuildCLI`.
+* **CI Pre-Build Suite (`scripts/ci_test.sh`, `22/22 PASSED`):**
+  * Covers `T1-Syntax` (all `.sh`, `init.d/*`, `uci-defaults/*`, `usr/sbin/*`), `T2`–`T3h` (Patches `0001`–`0008`), `T3d-AQRGuard`, `T4-Security`, `T5-Mode`, `T6-Diffconfig`, `T7-BlobExtract`, `T8-Firewall`, `T9-OverlayInit`, `T9b-PersistLog`, `T10-DualProfile`, `T11-TFTPFlasher`, `T12-DocsAndLicenses`, `T13-NoTrackedBinaries`, `T14-PythonAndBuildCLI`.

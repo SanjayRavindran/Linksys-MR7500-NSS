@@ -236,21 +236,34 @@ class MR7500Validator:
         ports = brif_out.split()
         has_all_lan = all(f"lan{i}" in ports for i in range(1, 5))
 
+        dt_cmd = (
+            "pkg=$(tr -d '\\0' < /proc/device-tree/soc@0/mdio@90000/ethernet-phy-package/qcom,package-mode 2>/dev/null); "
+            "modes=$(for p in dp1 dp2 dp3 dp4; do tr -d '\\0' < /proc/device-tree/soc@0/$p/phy-mode 2>/dev/null; echo -n ' '; done); "
+            'sw=$(hexdump -e \'1/4 "%08x"\' /proc/device-tree/soc@0/ess-instance/ess-switch@3a000000/switch_mac_mode 2>/dev/null); '
+            "echo \"pkg=$pkg modes=($modes) sw=$sw\""
+        )
+        _, dt_out, _ = self.ssh_exec(dt_cmd)
+        psgmii_ok = (
+            "pkg=psgmii" in dt_out
+            and dt_out.count("psgmii") >= 5
+            and "sw=00000000" in dt_out
+        )
+
         if self.is_ap_mode:
             has_wan = "wan" in ports
-            if has_all_lan and has_wan:
-                self.record("TC-05", "Unified 5-Port Multi-Gigabit Switch Fabric", "PASS",
-                            f"All 5 ports bridged into br-lan: {', '.join(sorted(ports))}.")
+            if has_all_lan and has_wan and psgmii_ok:
+                self.record("TC-05", "Unified 5-Port Multi-Gigabit Switch Fabric (PSGMII)", "PASS",
+                            f"All 5 ports bridged into br-lan ({', '.join(sorted(ports))}); {dt_out.strip()}.")
             else:
-                self.record("TC-05", "Unified 5-Port Multi-Gigabit Switch Fabric", "FAIL",
-                            f"Missing ports in br-lan: {ports}")
+                self.record("TC-05", "Unified 5-Port Multi-Gigabit Switch Fabric (PSGMII)", "FAIL",
+                            f"ports={ports}, psgmii_ok={psgmii_ok} ({dt_out.strip()})")
         else:
-            if has_all_lan:
-                self.record("TC-05", "QCA8075 4-Port LAN Switch Fabric", "PASS",
-                            f"LAN ports {', '.join(ports)} bridged into br-lan.")
+            if has_all_lan and psgmii_ok:
+                self.record("TC-05", "QCA8075 4-Port LAN Switch Fabric (PSGMII)", "PASS",
+                            f"LAN ports {', '.join(ports)} bridged into br-lan; {dt_out.strip()}.")
             else:
-                self.record("TC-05", "QCA8075 4-Port LAN Switch Fabric", "FAIL",
-                            f"Missing LAN ports in br-lan: {ports}")
+                self.record("TC-05", "QCA8075 4-Port LAN Switch Fabric (PSGMII)", "FAIL",
+                            f"ports={ports}, psgmii_ok={psgmii_ok} ({dt_out.strip()})")
 
     def test_06_management_ip_and_internet_routing(self):
         rc, ping_out, _ = self.ssh_exec("ping -c 2 -W 2 1.1.1.1")

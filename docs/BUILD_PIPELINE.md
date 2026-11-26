@@ -6,6 +6,15 @@ This document describes the automated GitHub Actions CI/CD pipeline for the **Li
 
 ## 1. Pipeline Overview & Scheduling
 
+```mermaid
+flowchart TD
+    TRIG["Monthly Cron (1st 00:00 UTC) or Manual Dispatch"] --> CI["Run 22-Gate scripts/ci_test.sh + Patch-Apply Gate"]
+    CI --> EXT["Extract & Verify Stock Blobs (AQR114C v5.6.5 + NSS 12.5)"]
+    EXT --> BLD["Compile Router Mode & Switch+AP Mode Images"]
+    BLD --> VAL["Run 15-Gate validate_build_artifacts.sh (FIT/DTB/Control)"]
+    VAL --> REL["Publish Private Draft Release (+ Optional AES-256 Artifact)"]
+```
+
 The GitHub Actions workflow is defined in [`.github/workflows/build-monthly-snapshot.yml`](../.github/workflows/build-monthly-snapshot.yml).
 
 ### Execution Triggers
@@ -49,20 +58,21 @@ The GitHub Actions workflow is defined in [`.github/workflows/build-monthly-snap
 
 ## 3. Pre-Build Automated Test Suite (`scripts/ci_test.sh`)
 
-Before a single compiler thread is spawned, the workflow executes the 17-gate pre-build test suite in [`scripts/ci_test.sh`](../scripts/ci_test.sh) plus a live upstream patch-apply check against `qosmio/openwrt-ipq` (`92a2d104`) on Ubuntu 24.04:
+Before a single compiler thread is spawned, the workflow executes the 22-gate pre-build test suite in [`scripts/ci_test.sh`](../scripts/ci_test.sh) plus a live upstream patch-apply check against `qosmio/openwrt-ipq` (`92a2d104`) on Ubuntu 24.04:
 
 | Test ID | Test Name | Purpose & Verification Criteria |
 |---|---|---|
 | **T1** | **Script Syntax Validation** | Runs `bash -n` on all repository scripts, `/etc/rc.local`, `/usr/sbin/switch_mode`, and firewall hooks. |
 | **T2** | **Patch 0001 Integrity** | Asserts AQR114C timing (`reset-deassert-us = <250000>`), USB host mode (`dr_mode = "host"`), MACSec PHY address (`0x8`), and C45 MDIO probe retry logic (`FWNODE_MDIO_C45_PROBE`). |
 | **T3** | **Patch 0002 In-Band Signalling** | Verifies USXGMII `managed = "in-band-status"` DTS property for 5GbE WAN link rate negotiation. |
+| **T3h** | **Patch 0008 QCA8075 PSGMII** | Asserts `qcom,package-mode = "psgmii"`, `dp1..dp4 phy-mode = "psgmii"`, and `switch_mac_mode = <MAC_MODE_PSGMII>`. |
 | **T4** | **Security & Sensitive Data Leak Audit** | Scans all files for leaked SSH private keys, API tokens, passwords, or personal credentials. |
 | **T5** | **Default Operating Mode Verification** | Asserts that `files/etc/config/network` and `dhcp` configure **Router Mode** (`10.143.1.1/24`, WAN DHCP client, LAN DHCP server active), and `/usr/sbin/switch_mode` is executable. |
 | **T6** | **Diffconfig Architecture & Package Symbols** | Validates target architecture (`qualcommax/ipq60xx/linksys_mr7500`), NSS 12.5 firmware, crypto offloading, SQM, and filesystem drivers (`vfat`, `exfat`). |
 | **T7** | **Stock Blob Extractor Verification** | Verifies that `scripts/extract_stock_blobs.sh` checks the official SHA-256 checksum (`32bc96c20351d7981d2d905b843899834e6dd620844218d6f3e1ecb9691745f3`) for `AQR114C.cld`. |
 | **T8** | **Firewall Hook Robustness** | Verifies `/etc/firewall.d/qca-nss-ecm` includes an nft chain check to prevent syntax errors when operating in Switch+AP mode. |
 
-If any of these 17 checks fail, the workflow terminates immediately, preventing unnecessary runner usage.
+If any of these 22 checks fail, the workflow terminates immediately, preventing unnecessary runner usage.
 
 ---
 

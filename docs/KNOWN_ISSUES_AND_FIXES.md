@@ -274,3 +274,11 @@ This document compiles all major engineering challenges, bugs, timing races, and
   2. Changed `&dp1`..`&dp4` `phy-mode` from `"qsgmii"` to `"psgmii"`.
   3. Changed `&switch` `switch_mac_mode` from `<MAC_MODE_QSGMII>` (`0x0b`) to `<MAC_MODE_PSGMII>` (`0x00`).
 * **Dual-Slot Verification (2026-11-26):** Rebuilt FIT `fdt-1` DTB with `psgmii` (`switch_mac_mode=00000000`, FIT SHA-256 `c4a7d0f8b2e4e034ce832936978ea3be1ee6495bd5a8d4a2baf2fb05b5594395`), flashed cleanly to **both Slot 1 (`mtd13`/`mtd14`) and Slot 2 (`mtd15`/`mtd16`)**, verified identical `mtd13`/`mtd15` SHA-256, `lan3` `1000Mb/s Full` with bidirectional `rx_packets`/`tx_packets` and FDB MAC learning (`dc:a6:32:f9:d3:c4` on port 3), `ip link set lan3 down/up` recovery, `wan` `2500Mb/s Full` (`4:0xc441=0x0008`), and all 3 Wi-Fi radios up.
+
+```mermaid
+flowchart TD
+    S["Client Connects to lan1/lan3 -> 1000M Full PHY Link, rx_packets = 0"] --> C["Inspect Stock OEM DTB (work/stock_board.dts)"]
+    C --> D["Found switch_mac_mode = 0x00 (PSGMII) vs OpenWrt 0x0b (QSGMII)"]
+    D --> F["Apply Patch 0008: package-mode, dp1..dp4, switch_mac_mode -> PSGMII"]
+    F --> V["Verified Dual-Slot Flash (mtd13 == mtd15) + 948.5 Mbps L2 Switch Throughput"]
+```

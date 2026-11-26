@@ -1,6 +1,6 @@
 # Linksys MR7500 OpenWrt + NSS Architecture Charts & Engineering Experience Log
 
-This document captures the verified system architecture, hardware/network topology, IRQ affinity layout, patch evolution (`0001`–`0006`), dual-slot boot/logging flow, and empirical lessons learned across development and physical validation on the **Linksys MR7500 (Hydra Pro 6E, IPQ6018, codename `divo`)**.
+This document captures the verified system architecture, hardware/network topology, IRQ affinity layout, patch evolution (`0001`–`0008`), dual-slot boot/logging flow, and empirical lessons learned across development and physical validation on the **Linksys MR7500 (Hydra Pro 6E, IPQ6018, codename `divo`)**.
 
 ---
 
@@ -27,7 +27,8 @@ flowchart LR
             NSS["Qualcomm NSS Dual-Core Ubi32 (FW 12.5-210-CP.R)"]
             PPE["PPE Switch / EDMA / GMAC0..4"]
             AQR["Marvell AQR114C-B0 5GbE PHY (MDIO 8, C45 USXGMII)"]
-            QCA["QCA8075 4x1GbE PHY (MDIO 0..3, QSGMII)"]
+            QCA["QCA8075 4x1GbE PHY (MDIO 0..3, PSGMII 0x00, Patch 0008)"]
+            PI4["Raspberry Pi 4B (192.168.1.45 on lan3 @ 1000M)"]
             AHB["Internal Wi-Fi (QCN5022 2.4G phy1 + QCN5052 5G phy0 via ath11k_ahb)"]
             PCI["PCIe 0000:01:00.0 -> QCN9074 6G 4x4 (phy2 via ath11k_pci)"]
             SERIAL["UART0 Console (ttyMSM0)"]
@@ -40,6 +41,7 @@ flowchart LR
 
     SW -- "2.5GbE USXGMII (dp5-syn / wan)" --> AQR
     AQR --- PPE
+    PI4 -- "1GbE Full (lan3, 948.5 Mbps)" --> QCA
     QCA --- PPE
     PPE --- NSS
     NSS --- BR
@@ -86,7 +88,7 @@ Key design rules enforced by `patches/0006-qualcommax-mr7500-serialize-ath11k-ah
 
 ---
 
-## 3. Patch Stack Evolution (`0001`–`0006`) & Overlay Services
+## 3. Patch Stack Evolution (`0001`–`0008`) & Overlay Services
 
 ```mermaid
 flowchart LR
@@ -96,7 +98,8 @@ flowchart LR
     P4 --> P5["Patch 0005: AQR114C FW Provisioning Wait + USXGMII C37 AN Re-Arm on Boot/Resume/Hotplug"]
     P5 --> P6["Patch 0006: ath11k_ahb ce_irq_lock Spinlock (990) + mr7500-irq-tune AHB CE CPU 1 Pinning"]
     P6 --> P7["Patch 0007: AQR114C Async FW Watchdog (0986) + 100ms LED Blink Stretch + Overload Guards"]
-    P7 --> OV["Rootfs Overlays: 99-mr7500-nss-defaults + mr7500-irq-tune + mr7500-persist-log + mr7500-log-watch"]
+    P7 --> P8["Patch 0008: QCA8075 PSGMII Mode (MAC_MODE_PSGMII 0x00, OpenWrt #25746)"]
+    P8 --> OV["Rootfs Overlays: 99-mr7500-nss-defaults + mr7500-irq-tune + mr7500-persist-log + mr7500-log-watch"]
 ```
 
 ---
@@ -192,5 +195,23 @@ flowchart TD
 ` while U-Boot counts down `"Hit any key to stop autoboot"`.
 3. **AQR114C Empirical Observations (`v5.6.5 Cybertan Divo`):**
    * Firmware heartbeat `30:0xc886` ticks monotonically at **1 Hz** both when linked (`2500Mb/s`) and when physically **unplugged** (`carrier=0`).
-   * Thermal register `30:0xc830` (`VEND1_GENERAL_STAT1`) showed `BIT(14)` (`0x5000`) at ~64.5â€“70.2Â°C (`hwmon7`) and cleared to `0x1000` at 66.6Â°C (`30:0xc420 == 0`); never gate reloads on thermal alarm bits.
+   * Thermal register `30:0xc830` (`VEND1_GENERAL_STAT1`) showed `BIT(14)` (`0x5000`) at ~64.5–70.2°C (`hwmon7`) and cleared to `0x1000` at 66.6°C (`30:0xc420 == 0`); never gate reloads on thermal alarm bits.
    * Both slots flashed cleanly without `-n` (`boot_part=2 -> 1 -> 2` via HTTP `192.168.1.24:18080` + SHA-256 + `sysupgrade -T`), preserving Switch+AP config and yielding identical live `aquantia.ko` (`79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`) from `switch-ap-mode` `sysupgrade.bin` (`0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`).
+
+---
+
+## 8. QCA8075 PSGMII Fix & Dual-Slot Rollout (`2026-11-26`, `Patch 0008`)
+
+```mermaid
+flowchart TD
+    SYM["Symptom: lan1 (Intel I218-V) & lan3 (RPi 4B) Link 1000M Full, rx_packets=0, brctl empty"] --> CMP["Compare Live DTB vs Stock OEM DTB"]
+    CMP --> ROOT["Root Cause: Upstream qsgmii (0x0b) vs OEM PSGMII (switch_mac_mode = 0x0)"]
+    ROOT --> PATCH["Patch 0008: qcom,package-mode & dp1..dp4 -> psgmii, switch_mac_mode -> MAC_MODE_PSGMII"]
+    PATCH --> S1["Flash Slot 1 (mtd13/mtd14, boot_part=1): Verify lan3 rx>0, FDB MAC, down/up"]
+    S1 --> S2["Flash Slot 2 (mtd15/mtd16, boot_part=2): Verify Identical FIT SHA-256 (c4a7d0f8...)"]
+    S2 --> BENCH["L2 Switch Test (192.168.1.83 <-> RPi 4B 192.168.1.45): 943.5 / 948.5 Mbps, 0 Errors"]
+```
+
+* **Multi-Client Proof Eliminated NIC False Leads:** Both an Intel `I218-V` (`e1000e` on `lan1`) and a Raspberry Pi 4B (`eth0` on `lan3`) negotiated clean `1000Mb/s Full` copper links (`reg10=0x7800/0x7c00`, 0 idle errors) yet recorded `rx_packets = 0` on MR7500, proving the fault sat between IPQ6018 PPE and the `QCA8075` package SerDes.
+* **Stock OEM DTB Truth Check:** `work/stock_board.dts` showed `switch_mac_mode = <0x0>` (`MAC_MODE_PSGMII`), matching OpenWrt Issue `#25746`.
+* **Dual-Slot FIT Verification & Benchmark:** Both Slot 1 (`mtd13`) and Slot 2 (`mtd15`) now run identical `fdt-1` PSGMII FIT kernels (`5,464,812` B, SHA-256 `c4a7d0f8b2e4e034ce832936978ea3be1ee6495bd5a8d4a2baf2fb05b5594395`; Switch+AP `sysupgrade.bin` SHA-256 `f25e582a68b4eec9622735f7d830c07f720982b77a30d9138990bd6e67edf634`), passing `943.46 Mbps` up / `948.53 Mbps` down with `0` errors and `0.00 0.03 0.02` CPU load.

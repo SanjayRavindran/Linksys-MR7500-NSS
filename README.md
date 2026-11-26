@@ -34,7 +34,7 @@ This repository provides full out-of-the-box **Qualcomm Network Subsystem (NSS) 
 
 - **Qualcomm NSS Hardware Offloading:** NSS Core 0 firmware (`NSS.FW.12.5-210-CP.R`) with dynamic frequency scaling (187.2 / 748.8 / 1497.6 MHz) and RPS distribution across all 4 Cortex-A53 cores.
 - **Wire-Speed Forwarding at Zero CPU Load:** 944+ Mbps NAT throughput with **99.95% host CPU idle** (0.03% softirq) accelerated via Qualcomm ECM + NSS.
-- **Multi-Gigabit 5GbE WAN Port (2.37 Gbps Verified):** Synopsys XGMAC + Marvell/Aquantia **AQR114C** PHY operating over USXGMII with Clause 37 in-band auto-negotiation (`0x0008`), cold-boot probe timing patch (`0982`), async runtime firmware watchdog + 100 ms HW LED blink stretch (`0986` / Patch `0007`). Tested and verified peer-to-peer at **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
+- **Multi-Gigabit 5GbE WAN Port (2.37 Gbps Verified):** Synopsys XGMAC + Marvell/Aquantia **AQR114C** PHY operating over USXGMII with Clause 37 in-band auto-negotiation (`0x0008`), cold-boot probe timing patch (`0982`), async runtime firmware watchdog + 100 ms HW LED blink stretch (`0986` / Patch `0007`), plus PSGMII 4x1GbE LAN switch mode (`MAC_MODE_PSGMII`, Patch `0008`). Tested and verified peer-to-peer at **2.32 Gbps Upload / 2.37 Gbps Download** with 0 retransmissions.
 - **Tri-Band Wi-Fi 6E (Out-of-the-Box):**
   - **2.4 GHz:** 2x2 802.11ax (HE40) via IPQ6018 internal radio (`QCN5022`, SSID `Linksys-MR7500-2.4G`, WPA2-PSK).
   - **5 GHz:** 2x2 802.11ax (HE80) via IPQ6018 internal radio (`QCN5052`, SSID `Linksys-MR7500-5G`, WPA2-PSK).
@@ -59,7 +59,7 @@ This repository provides full out-of-the-box **Qualcomm Network Subsystem (NSS) 
 | **RAM** | 512 MB DDR3L | Linux 6.12 + NSS Carveouts | **Active** (`386,492 kB` total, ~129 MB free) |
 | **Flash** | 512 MB Hynix H27S4G8F2EDA-BC SLC NAND (`0` bad PEBs) | Qualcomm QPIC NAND / BAM | **Active** (Dual A/B slot partition layout) |
 | **WAN (Multi-Gig)** | 1x 5GbE Multi-Gigabit port (`dp5_syn`) via AQR114C-B0 | `aquantia` C45 over USXGMII | **Active** (**2500M Full Duplex**, **2.37 Gbps** TCP verified) |
-| **Switch / LAN** | 4x 1GbE LAN ports (`dp1`..`dp4`) via Qualcomm QCA8075 | `qca8075` over QSGMII | **Active** (1000M Full Duplex per port) |
+| **Switch / LAN** | 4x 1GbE LAN ports (`dp1`..`dp4`) via Qualcomm QCA8075 | `qca8075` over **PSGMII** (`MAC_MODE_PSGMII = 0x00`, Patch `0008`) | **Active** (**1000M Full Duplex**, **948.53 Mbps** L2 switch verified) |
 | **NSS Hardware Offload** | Qualcomm NSS Ubi Core 0 & Core 1 | `qca-nss-drv` + `qca-nss-ecm` | **Active** (Wire-speed NAT/routing, 99.95% CPU idle) |
 | **Hardware Crypto** | Qualcomm EIP-197 + Qualcomm CE (`crypto-v5.1`) | `qca-nss-crypto` | **Active** (AES-CBC, AES-CTR, AES-CCM, 3DES, HMAC) |
 | **True RNG** | Qualcomm Hardware PRNG | `qcom,prng-ipq807x` | **Active** (Kernel entropy pool) |
@@ -73,6 +73,21 @@ This repository provides full out-of-the-box **Qualcomm Network Subsystem (NSS) 
 | **Auxiliary I2C** | Qualcomm QUP I2C 2 (`i2c@78b7000`, GPIO 42/43) | `qcom,i2c-qup` | **Standby** (PCA9632 @ `0x62` init by U-Boot preboot) |
 | **Buttons** | WPS (GPIO 37) & Reset (GPIO 56) | `gpio_button_hotplug` | **Active** (Pull-ups verified, hotplug events active) |
 | **System LEDs** | Blue Power, Blue USB, Green & Red Indicator | `pwm-leds` (IPQ6018 PWM 0..3) | **Active** (Controlled via `/sys/class/leds/`) |
+
+---
+
+## System Architecture & Offload Data-Path Flowchart
+
+```mermaid
+flowchart LR
+    WANPHY["Marvell AQR114C-B0 5GbE PHY (MDIO 8, USXGMII C37 AN 0x0008)"] <--> XGMAC["Synopsys XGMAC (0x3a003000, dp5-syn / wan)"]
+    LANPHY["Qualcomm QCA8075 4x1GbE PHY (MDIO 0..3, PSGMII 0x00, Patch 0008)"] <--> GMAC["GMAC0..3 (dp1..dp4 / lan1..lan4, IPGT=0x70)"]
+    XGMAC <--> PPE["IPQ6018 PPE Switch & EDMA"]
+    GMAC <--> PPE
+    PPE <--> NSS["Qualcomm NSS Dual-Core Ubi32 (FW 12.5 + ECM)"]
+    NSS <--> BR["Linux Bridge br-lan (Router NAT or Switch+AP 192.168.1.91)"]
+    WIFI["Tri-Band Wi-Fi 6E (2.4G/5G AHB ce_irq_lock + 6G QCN9074 PCIe, host mac80211)"] <--> BR
+```
 
 ---
 
@@ -103,6 +118,14 @@ Direction: MR7500 Router WAN (192.168.1.91) ---> PC (192.168.1.80) [Reverse]
 * **Throughput:** **944 Mbps** line rate (Gigabit Ethernet limited).
 * **Host CPU Utilization:** **0.03% softirq load, 99.95% ARM Cortex-A53 CPU idle**.
 * **Offloaded Flows:** All active IPv4 and IPv6 flows accelerated directly by Qualcomm NSS ECM silicon bypass.
+
+---
+
+### 3. Switch+AP L2 Switch Throughput (`wan` 2.5GbE <-> `lan3` 1GbE Raspberry Pi 4B)
+Measured live after dual-slot Patch `0008` (`PSGMII`) deployment between a LAN workstation (`192.168.1.83`) via the upstream 2.5GbE switch into MR7500 `wan` (`192.168.1.91`) -> `lan3` -> Raspberry Pi 4B (`192.168.1.45`, 4 parallel TCP streams, 10s each direction):
+- **Host -> Pi 4B (Upload):** **`943.46 Mbps`** (`1,180.96 MB` in `10.01s`)
+- **Pi 4B -> Host (Download):** **`948.53 Mbps`** (`1,186.03 MB` in `10.00s`)
+- **Errors / Drops / Flaps:** `0` RX/TX errors, `0` drops, `0` carrier flaps across `wan`, `lan3`, and `eth0`; MR7500 load average **`0.00 0.03 0.02`**.
 
 ---
 
@@ -170,7 +193,7 @@ Each workflow run and `--profile all` local build generates two validated binary
 
 ### Multi-Tier Automated Testing Architecture
 Every push and release must pass all automated test gates:
-1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 20 gates validating script syntax, Patches `0001`–`0006`, persistent 3-boot logging (`mr7500-persist-log`), AQR114C DTS NVMEM downgrade protection (`T3d-AQRGuard`), credential hygiene, Router & Switch+AP profile integrity, TFTP loopback self-test (`T11-TFTPFlasher`), `LICENSE` & `SOURCES_AND_LICENSES.md`, sanitized REA analysis docs, and zero tracked binaries (`T13-NoTrackedBinaries`).
+1. **Pre-Build Test Suite ([`scripts/ci_test.sh`](scripts/ci_test.sh)):** 22 gates validating script syntax, Patches `0001`–`0008`, persistent 3-boot logging (`mr7500-persist-log`), AQR114C DTS NVMEM downgrade protection (`T3d-AQRGuard`), credential hygiene, Router & Switch+AP profile integrity, TFTP loopback self-test (`T11-TFTPFlasher`), `LICENSE` & `SOURCES_AND_LICENSES.md`, sanitized REA analysis docs, and zero tracked binaries (`T13-NoTrackedBinaries`).
 2. **Upstream Base Patch-Apply Gate:** Clones `qosmio/openwrt-ipq` (`92a2d104145c8d265851c4b388a41bd8e9c21cd9`) on Ubuntu 24.04 and proves all patches apply cleanly before any compilation starts.
 3. **Post-Build Artifact & SquashFS Verification ([`scripts/validate_build_artifacts.sh`](scripts/validate_build_artifacts.sh)):** 15 gates per profile verifying image sizes, SquashFS rootfs contents (`unsquashfs` checks for patched `qca-nss-pbuf`, executable `mr7500-irq-tune`, profile `network`/`dhcp` configs), FIT magic headers, AQR114C FIT DTB protection (`AQR-PROTECTION`), and SHA-256 checksums.
 

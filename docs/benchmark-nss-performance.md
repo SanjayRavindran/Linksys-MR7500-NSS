@@ -60,3 +60,17 @@ common stats:
   queue_drops = 0
 ```
 Over 670,000 packets (~1 GB of data) were processed directly by the NSS engine with 0 queue drops.
+
+---
+
+## 4. L2 Bridge Hardware Switch Benchmark (`wan` 2.5GbE <-> `lan3` 1GbE PSGMII)
+
+```mermaid
+flowchart LR
+    PC["Host 192.168.1.83"] <-- "2500M wan" --> PPE["MR7500 PPE Switch Core (0.00 0.03 0.02 load)"]
+    PPE <-- "1000M lan3 (PSGMII)" --> PI["Pi 4B 192.168.1.45 (943.5 Mbps Up / 948.5 Mbps Down)"]
+```
+
+* **Upload (`192.168.1.83 -> 192.168.1.45`, 4 TCP streams, 10s):** **`943.46 Mbps`**.
+* **Download (`192.168.1.45 -> 192.168.1.83`, 4 TCP streams, 10s):** **`948.53 Mbps`**.
+* **Packet Integrity:** ~1.88M frames / ~2.4 GB total with `0` RX/TX errors, `0` MAC errors (`lan3_mac_errors=0`), `0` drops, and `0` link flaps.
