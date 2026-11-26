@@ -1,0 +1,78 @@
+From 65257fabf8dfdb4f3495cf58fe3dec580071a2f0 Mon Sep 17 00:00:00 2001
+From: Sanjay Ravindran <sanjay@local>
+Date: Thu, 26 Nov 2026 10:54:51 +0000
+Subject: [PATCH] qualcommax: mr7500: use PSGMII mode for QCA8075 LAN switch
+
+The Linksys MR7500 wires its 4-port QCA8075 LAN PHY in PSGMII mode
+(stock OEM DTB uses switch_mac_mode = <0x0> / MAC_MODE_PSGMII), not
+QSGMII. With qsgmii configured, booting without an active LAN link leaves
+the IPQ6018 <-> QCA8075 SerDes receive path silent (rx_packets = 0) on
+lan1..lan4 despite 1000Mb/s Full PHY link (OpenWrt #25746).
+
+Switch qcom,package-mode, dp1..dp4 phy-mode, and switch_mac_mode to
+PSGMII/MAC_MODE_PSGMII.
+---
+ target/linux/qualcommax/dts/ipq6018-mr7500.dts | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/target/linux/qualcommax/dts/ipq6018-mr7500.dts b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+index 12c70cd..4512434 100644
+--- a/target/linux/qualcommax/dts/ipq6018-mr7500.dts
++++ b/target/linux/qualcommax/dts/ipq6018-mr7500.dts
+@@ -200,7 +200,7 @@
+ 		compatible = "qcom,qca8075-package";
+ 		reg = <0>;
+ 
+-		qcom,package-mode = "qsgmii";
++		qcom,package-mode = "psgmii";
+ 
+ 		qca8075_0: ethernet-phy@0 {
+ 			compatible = "ethernet-phy-ieee802.3-c22";
+@@ -332,7 +332,7 @@
+ 	status = "okay";
+ 	label = "lan1";
+ 	phy-handle = <&qca8075_0>;
+-	phy-mode = "qsgmii";
++	phy-mode = "psgmii";
+ 	nvmem-cells = <&hw_mac_addr 1>;
+ 	nvmem-cell-names = "mac-address";
+ };
+@@ -341,7 +341,7 @@
+ 	status = "okay";
+ 	label = "lan2";
+ 	phy-handle = <&qca8075_1>;
+-	phy-mode = "qsgmii";
++	phy-mode = "psgmii";
+ 	nvmem-cells = <&hw_mac_addr 1>;
+ 	nvmem-cell-names = "mac-address";
+ };
+@@ -350,7 +350,7 @@
+ 	status = "okay";
+ 	label = "lan3";
+ 	phy-handle = <&qca8075_2>;
+-	phy-mode = "qsgmii";
++	phy-mode = "psgmii";
+ 	nvmem-cells = <&hw_mac_addr 1>;
+ 	nvmem-cell-names = "mac-address";
+ };
+@@ -359,7 +359,7 @@
+ 	status = "okay";
+ 	label = "lan4";
+ 	phy-handle = <&qca8075_3>;
+-	phy-mode = "qsgmii";
++	phy-mode = "psgmii";
+ 	nvmem-cells = <&hw_mac_addr 1>;
+ 	nvmem-cell-names = "mac-address";
+ };
+@@ -382,7 +382,7 @@
+ 	status = "okay";
+ 	switch_lan_bmp = <( ESS_PORT1 | ESS_PORT2 | ESS_PORT3 | ESS_PORT4 )>;
+ 	switch_wan_bmp = <ESS_PORT5>;
+-	switch_mac_mode = <MAC_MODE_QSGMII>;
++	switch_mac_mode = <MAC_MODE_PSGMII>;
+ 	switch_mac_mode1 = <MAC_MODE_USXGMII>;
+ 
+ 	qcom,port_phyinfo {
+-- 
+2.53.0
+

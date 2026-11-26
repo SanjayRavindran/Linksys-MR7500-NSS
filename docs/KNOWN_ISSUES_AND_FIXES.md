@@ -23,6 +23,7 @@ This document compiles all major engineering challenges, bugs, timing races, and
 15. [Issue 15: Aquantia AQR114C 5GbE Port Link Failure on Boot & Hotplug (`USXGMII` C37 AN Drop)](#issue-15-aquantia-aqr114c-5gbe-port-link-failure-on-boot--hotplug-usxgmii-c37-an-drop)
 16. [Issue 16: `ath11k_ahb` Copy Engine `ce3` Edge-IRQ Freeze (`-105`/`-ENOBUFS` WMI Timeout & `D`-State Hang)](#issue-16-ath11k_ahb-copy-engine-ce3-edge-irq-freeze--105-enobufs-wmi-timeout--d-state-hang)
 17. [Issue 17: Aquantia AQR114C Volatile Firmware Loss on Hotplug & Zero LED Blink Stretch (`Patch 0007`)](#issue-17-aquantia-aqr114c-volatile-firmware-loss-on-hotplug--zero-led-blink-stretch-patch-0007)
+18. [Issue 18: QCA8075 1GbE LAN Ports Dead RX (`rx=0`) After Boot (`QSGMII` vs `PSGMII` Mismatch)](#issue-18-qca8075-1gbe-lan-ports-dead-rx-rx0-after-boot-qsgmii-vs-psgmii-mismatch)
 
 ---
 
@@ -260,3 +261,16 @@ This document compiles all major engineering challenges, bugs, timing races, and
      * **Callback Fencing & Clean Teardown:** `atomic_t fw_reloading` fences `config_aneg`, `handle_interrupt`, `get_stats`, `get/set_tunable`, `aqr_hwmon_read/write`, and `aqr_phy_led_*`. `aqr107_suspend()` and `aqr107_remove()` (wired on all 13 `aqr107_probe` `phy_driver` entries) set `fw_reload_abort = 1` and run `cancel_work_sync()` outside `phydev->lock`.
      * **Scheduler / RCU / Bounded Retries:** `aqr_fw_load_memory()` checks all MDIO write/read errors immediately and calls `cond_resched()` + `fw_reload_abort` check every 256 words (safe on `CONFIG_PREEMPT_NONE=y`). `aqr107_read_status()` never returns `< 0` from reload errors (prevents permanent `phy_error_precise()` -> `PHY_HALTED` latch). Consecutive reloads apply exponential backoff (`30s -> 60s -> 120s -> 240s -> 300s`) and stop at `AQR_FW_RELOAD_MAX_FAILS` (`5`) until 60s of sustained ticking health or interface restart (`aqr107_resume()`).
 * **Dual-Slot Verification (2026-11-20 / 2026-11-21):** Verified live on both **Slot 1 (`boot_part=1`)** and **Slot 2 (`boot_part=2`)** with Switch+AP `sysupgrade.bin` (SHA-256 `0740664d8dd3302ea3e1e891f5623c42cb6372ac8b7a5fbab2215d253e19ed54`), confirming identical `/lib/modules/6.12.92/aquantia.ko` (`79d2eb1bf853b40e6a45f9bccb264a6bc892c4b83b297907a85815661b56b217`), `2500Mb/s Full`, `4:0xc441=0x0008`, `30:0xc430=0xc06f`, blinking activity LEDs, and 1 Hz `30:0xc886` heartbeat both linked and unplugged.
+
+---
+
+### Issue 18: QCA8075 1GbE LAN Ports Dead RX (`rx=0`) After Boot (`QSGMII` vs `PSGMII` Mismatch)
+
+* **Severity:** **CRITICAL** (Complete Loss of All 4 Built-in 1GbE LAN Ports `lan1`..`lan4`).
+* **Symptom:** Devices connected to `lan1`..`lan4` (verified with both an Intel I218-V NIC on `lan1` and a Raspberry Pi 4B on `lan3`) established physical `1000Mb/s Full` Ethernet link (`reg1=0x796d`, `reg10=0x7800/0x7c00`), and `MR7500` incremented `tx_packets` on the port, yet `rx_packets` remained `0` on both `MR7500` and the attached client with zero bridge FDB MACs learned (`OpenWrt #25746`). Meanwhile `wan` (`dp5-syn` / `AQR114C` over `USXGMII`) operated normally.
+* **Root Cause:** Upstream `ipq6018-mr7500.dts` configured the 4-port `QCA8075` LAN PHY package and `dp1`..`dp4` in `qsgmii` mode (`qcom,package-mode = "qsgmii"`, `switch_mac_mode = <MAC_MODE_QSGMII>` = `0x0b`), whereas the Linksys MR7500 hardware and stock OEM DTB use **PSGMII** (`switch_mac_mode = <0x0>` = `MAC_MODE_PSGMII`).
+* **Permanent Fix (`patches/0008-qualcommax-mr7500-use-psgmii-for-qca8075.patch`):**
+  1. Changed `&mdio/ethernet-phy-package` `qcom,package-mode` from `"qsgmii"` to `"psgmii"`.
+  2. Changed `&dp1`..`&dp4` `phy-mode` from `"qsgmii"` to `"psgmii"`.
+  3. Changed `&switch` `switch_mac_mode` from `<MAC_MODE_QSGMII>` (`0x0b`) to `<MAC_MODE_PSGMII>` (`0x00`).
+* **Dual-Slot Verification (2026-11-26):** Rebuilt FIT `fdt-1` DTB with `psgmii` (`switch_mac_mode=00000000`, FIT SHA-256 `c4a7d0f8b2e4e034ce832936978ea3be1ee6495bd5a8d4a2baf2fb05b5594395`), flashed cleanly to **both Slot 1 (`mtd13`/`mtd14`) and Slot 2 (`mtd15`/`mtd16`)**, verified identical `mtd13`/`mtd15` SHA-256, `lan3` `1000Mb/s Full` with bidirectional `rx_packets`/`tx_packets` and FDB MAC learning (`dc:a6:32:f9:d3:c4` on port 3), `ip link set lan3 down/up` recovery, `wan` `2500Mb/s Full` (`4:0xc441=0x0008`), and all 3 Wi-Fi radios up.

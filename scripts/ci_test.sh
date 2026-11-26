@@ -207,6 +207,26 @@ fi
 
 # 3d. AQR114C DTS NVMEM Downgrade Guard
 echo "[*] Running Test 3d: AQR114C DTS NVMEM Guard..."
+# 3h. Patch 0008 QCA8075 PSGMII Fix (OpenWrt #25746)
+echo "[*] Running Test 3h: Patch 0008 QCA8075 PSGMII Mode..."
+PATCH_0008="$REPO_ROOT/patches/0008-qualcommax-mr7500-use-psgmii-for-qca8075.patch"
+if [ -f "$PATCH_0008" ]; then
+    MISSING_P8=0
+    for s in \
+        'qcom,package-mode = "psgmii";' \
+        'phy-mode = "psgmii";' \
+        'switch_mac_mode = <MAC_MODE_PSGMII>;'
+    do
+        if ! grep -qF -- "$s" "$PATCH_0008"; then
+            log_fail "T3h-Patch0008" "Missing expected fix in Patch 0008: $s"
+            MISSING_P8=1
+        fi
+    done
+    [ "$MISSING_P8" -eq 0 ] && log_pass "T3h-Patch0008" "Patch 0008 configures QCA8075 package, dp1..dp4, and switch_mac_mode for PSGMII"
+else
+    log_fail "T3h-Patch0008" "Patch 0008 not found at $PATCH_0008"
+fi
+
 if grep -rnE "^\+.*\baqr_fw\b" "$REPO_ROOT"/patches/*.patch 2>/dev/null; then
     log_fail "T3d-AQRGuard" "A patch re-adds aqr_fw NVMEM cell (risks v5.4.B downgrade or CRC failure)"
 else
